@@ -200,6 +200,8 @@ affected graph, metadata, full-text, and vector rows; unchanged files are not re
 
 Indexing keeps results in memory up to a budget (a fraction of system RAM, or `CBM_MEM_BUDGET_MB`)
 and spills extraction results to disk beyond it, so a large repository does not have to fit in RAM.
+The same budget covers the post-extraction phases; if the resident graph still exceeds it, indexing
+stops before publication and the previously indexed generation keeps serving.
 
 > **Research.** The design and benchmarks are described in the preprint
 > [*Codebase-Memory: Tree-Sitter-Based Knowledge Graphs for LLM Code Exploration via MCP*](https://arxiv.org/abs/2603.27277).
@@ -461,7 +463,7 @@ codebase-memory-mcp config reset auto_index            # back to the default
 | `CBM_CACHE_DIR` | `~/.cache/codebase-memory-mcp` | Where `cbm.zova` and settings live. |
 | `CBM_ALLOWED_ROOT` | unset | Refuse to index any path that resolves outside this directory. Useful when an untrusted caller drives the server. |
 | `CBM_WORKERS` | detected | Indexing workers. `0` is sequential; `1`–`256` sets the count. |
-| `CBM_MEM_BUDGET_MB` | fraction of RAM | Indexing memory budget in MiB. Beyond it, extraction results spill to disk. |
+| `CBM_MEM_BUDGET_MB` | fraction of RAM | Indexing memory budget in MiB. Beyond it, extraction results spill to disk; if the resident graph still exceeds it, post-extraction phases stop before publication. |
 | `CBM_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, or `none`. Logs go to stderr; stdout carries MCP JSON-RPC. |
 | `CBM_DIAGNOSTICS` | off | `1` writes periodic resource snapshots; see [Diagnostics](#diagnostics-and-troubleshooting). |
 | `CBM_DUMP_VERIFY_MIN_RATIO` | `0.5` | If fewer than this fraction of indexed nodes persist, `index_repository` reports `status: "degraded"`. `0` disables the check. |

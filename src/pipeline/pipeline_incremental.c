@@ -1012,9 +1012,21 @@ static void run_postpasses(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed_fil
 static int dump_and_persist(cbm_pipeline_t *pipeline, cbm_gbuf_t *gbuf, cbm_file_info_t *files,
                             int file_count, const cbm_file_hash_t *mode_skipped,
                             int mode_skipped_count, cbm_zova_workspace_snapshot_t *before) {
+    /* #49: same post-extraction gates as the full path. Aborting here leaves
+     * the served generation untouched (publish is atomic). */
+    cbm_pipeline_log_phase_mem("incr_pre_dump");
+    int gate_rc = cbm_pipeline_budget_gate("incr_pre_dump");
+    if (gate_rc != 0) {
+        return gate_rc;
+    }
     if (cbm_gbuf_prepare_zova_dump_delta(gbuf) != 0) {
         cbm_log_error("incremental.err", "phase", "zova_prepare");
         return CBM_NOT_FOUND;
+    }
+    cbm_pipeline_log_phase_mem("incr_zova_prepare");
+    gate_rc = cbm_pipeline_budget_gate("incr_zova_publish");
+    if (gate_rc != 0) {
+        return gate_rc;
     }
     if (cbm_pipeline_publish_zova_user_database_delta(pipeline, gbuf, files, file_count,
                                                       mode_skipped, mode_skipped_count,
@@ -1022,6 +1034,7 @@ static int dump_and_persist(cbm_pipeline_t *pipeline, cbm_gbuf_t *gbuf, cbm_file
         cbm_log_error("incremental.err", "phase", "zova_single_file");
         return CBM_NOT_FOUND;
     }
+    cbm_pipeline_log_phase_mem("incr_zova_publish");
     return 0;
 }
 
@@ -1228,6 +1241,11 @@ static int run_incremental(cbm_pipeline_t *p, cbm_file_info_t *files, int file_c
     }
 
     int extract_rc = run_extract_resolve(&ctx, changed_files, ci);
+    /* #49: extract + resolve work sets are done; gate before the derived
+     * passes and publication so an over-budget run stops here. */
+    if (extract_rc == 0) {
+        extract_rc = cbm_pipeline_budget_gate("incr_resolve");
+    }
     if (extract_rc != 0) {
         incr_free_edge_capture(&edge_cap);
         free(changed_files);

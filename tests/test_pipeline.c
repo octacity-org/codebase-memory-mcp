@@ -8983,6 +8983,29 @@ static bool write_backpressure_fixture(void) {
     return true;
 }
 
+/* #49: post-extraction phases use the same budget contract as extract. No
+ * budget is a no-op, under budget passes, and a resident set that stays over
+ * budget after the collect+nap cycle fails the attempt whole instead of
+ * letting resolve/dump/publish overshoot silently. */
+TEST(pipeline_post_extract_budget_gate) {
+    size_t saved_budget = cbm_mem_budget();
+
+    cbm_mem_set_budget_for_tests(0);
+    ASSERT_EQ(cbm_pipeline_budget_gate("test_no_budget"), 0);
+
+    cbm_mem_set_budget_for_tests(SIZE_MAX);
+    ASSERT_EQ(cbm_pipeline_budget_gate("test_under_budget"), 0);
+
+    /* 1 MiB: the process resident set is permanently over it, so the bounded
+     * nap cannot drain and the gate must return the named abort code. */
+    cbm_mem_set_budget_for_tests((size_t)1024 * 1024);
+    int rc = cbm_pipeline_budget_gate("test_over_budget");
+    cbm_mem_set_budget_for_tests(saved_budget);
+
+    ASSERT_EQ(rc, CBM_PIPELINE_ABORT_OVER_BUDGET);
+    PASS();
+}
+
 TEST(pipeline_backpressure_futile_nap_disengages) {
     /* 64 tiny files: > MIN_FILES_FOR_PARALLEL (50) so the parallel path (and its
      * back-pressure gate) actually runs; old-code cycles (~64) >> the bound. */
@@ -9992,6 +10015,7 @@ SUITE(pipeline) {
     /* Extraction back-pressure */
     /* Fail-whole stops the 1 MiB-budget runs at extraction, before any
      * database dump, so these run in the default suite again. */
+    RUN_TEST(pipeline_post_extract_budget_gate);
     RUN_TEST(pipeline_backpressure_futile_nap_disengages);
     RUN_TEST(pipeline_over_budget_after_futility_fails_whole_and_preserves_generation);
     /* Extraction result spill (F1) */
