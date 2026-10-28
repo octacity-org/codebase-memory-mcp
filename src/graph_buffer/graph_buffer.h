@@ -107,8 +107,17 @@ int cbm_gbuf_node_count(const cbm_gbuf_t *gb);
 /* Get the next ID that would be assigned. Used to initialize shared atomic counters. */
 int64_t cbm_gbuf_next_id(const cbm_gbuf_t *gb);
 
-/* Set the next ID counter. Used after merging worker gbufs to sync the main counter. */
+/* Set the next ID counter exactly. Can lower it; to sync after merging worker
+ * gbufs use cbm_gbuf_raise_next_id instead. */
 void cbm_gbuf_set_next_id(cbm_gbuf_t *gb, int64_t next_id);
+
+/* Raise the next ID counter to at least next_id. Never lowers it, so no id
+ * already handed out comes back. Used to sync after merging worker gbufs. */
+void cbm_gbuf_raise_next_id(cbm_gbuf_t *gb, int64_t next_id);
+
+/* Number of edges whose id an earlier edge already carries (0 = ids unique,
+ * CBM_NOT_FOUND on allocation failure). */
+int cbm_gbuf_duplicate_edge_ids(const cbm_gbuf_t *gb);
 
 /* Delete all nodes with a label. Cascade-deletes referencing edges. */
 int cbm_gbuf_delete_by_label(cbm_gbuf_t *gb, const char *label);

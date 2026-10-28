@@ -806,7 +806,7 @@ static int run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed
                 free(cache);
                 return rc;
             }
-            cbm_gbuf_set_next_id(ctx->gbuf, atomic_load(&shared_ids));
+            cbm_pipeline_sync_next_id(ctx->gbuf, &shared_ids);
             cbm_log_info("pass.timing", "pass", "incr_extract", "elapsed_ms",
                          itoa_buf((int)elapsed_ms(t)));
 
@@ -825,7 +825,7 @@ static int run_extract_resolve(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed
             cbm_parallel_resolve(ctx, changed_files, ci, cache, &shared_ids, worker_count, NULL, 0,
                                  NULL, NULL /* module_def_index */,
                                  NULL /* cross_registries — incremental skips Tier 2 prebuild */);
-            cbm_gbuf_set_next_id(ctx->gbuf, atomic_load(&shared_ids));
+            cbm_pipeline_sync_next_id(ctx->gbuf, &shared_ids);
             cbm_log_info("pass.timing", "pass", "incr_resolve", "elapsed_ms",
                          itoa_buf((int)elapsed_ms(t)));
 
@@ -1012,6 +1012,7 @@ static void run_postpasses(cbm_pipeline_ctx_t *ctx, cbm_file_info_t *changed_fil
 static int dump_and_persist(cbm_pipeline_t *pipeline, cbm_gbuf_t *gbuf, cbm_file_info_t *files,
                             int file_count, const cbm_file_hash_t *mode_skipped,
                             int mode_skipped_count, cbm_zova_workspace_snapshot_t *before) {
+    cbm_pipeline_run_before_dump_hook(gbuf);
     if (cbm_gbuf_prepare_zova_dump_delta(gbuf) != 0) {
         cbm_log_error("incremental.err", "phase", "zova_prepare");
         return CBM_NOT_FOUND;

@@ -516,6 +516,213 @@ TEST(gbuf_next_id_accessors) {
     PASS();
 }
 
+TEST(gbuf_raise_next_id_never_lowers) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("proj", "/");
+    cbm_gbuf_raise_next_id(gb, 100);
+    ASSERT_EQ(cbm_gbuf_next_id(gb), 100);
+    cbm_gbuf_raise_next_id(gb, 40);
+    ASSERT_EQ(cbm_gbuf_next_id(gb), 100);
+    int64_t id = cbm_gbuf_upsert_node(gb, "Function", "foo", "proj.foo", "f.go", 1, 5, "{}");
+    ASSERT_EQ(id, 100);
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
+TEST(gbuf_duplicate_edge_ids_counts_reused_ids) {
+    cbm_gbuf_t *gb = cbm_gbuf_new("proj", "/");
+    int64_t a = cbm_gbuf_upsert_node(gb, "Function", "a", "proj.a", "f.go", 1, 2, "{}");
+    int64_t b = cbm_gbuf_upsert_node(gb, "Function", "b", "proj.b", "f.go", 3, 4, "{}");
+    int64_t next = cbm_gbuf_next_id(gb);
+    cbm_gbuf_insert_edge(gb, a, b, "CALLS", "{\"n\":1}");
+    ASSERT_EQ(cbm_gbuf_duplicate_edge_ids(gb), 0);
+    /* Lowering the counter hands the same id out again. */
+    cbm_gbuf_set_next_id(gb, next);
+    cbm_gbuf_insert_edge(gb, b, a, "CALLS", "{\"n\":2}");
+    ASSERT_EQ(cbm_gbuf_duplicate_edge_ids(gb), 1);
+    cbm_gbuf_free(gb);
+    PASS();
+}
+
+/* #50: edge ids in the main buffer stay unique through the parallel phases.
+ * Merged worker nodes keep their shared ids, and merged edges take fresh ids
+ * from the main counter after the highest of them, so the main counter can
+ * end above the shared one. The sync after each parallel phase used to set
+ * the main counter to the shared value anyway, and later passes reused the
+ * merged edges' ids. Where the counter ends depends on worker timing, so the
+ * seam pins it: right before each sync the hook takes ID_SYNC_PUSH edge ids
+ * from the main buffer. */
+enum { ID_FILES = 64, ID_SYNC_PUSH = 3 };
+
+typedef struct {
+    bool push;
+    int syncs;
+} id_sync_probe_t;
+
+static void id_sync_hook(cbm_gbuf_t *gb, void *ctx) {
+    id_sync_probe_t *probe = ctx;
+    probe->syncs++;
+    const cbm_gbuf_node_t **fns = NULL;
+    int n = 0;
+    if (!probe->push || cbm_gbuf_find_by_label(gb, "Function", &fns, &n) != 0 || n < 2) {
+        return;
+    }
+    char props[64];
+    for (int i = 0; i < ID_SYNC_PUSH; i++) {
+        snprintf(props, sizeof(props), "{\"id_sync_probe\":%d}", probe->syncs * ID_SYNC_PUSH + i);
+        cbm_gbuf_insert_edge(gb, fns[0]->id, fns[1]->id, "CALLS", props);
+    }
+}
+
+typedef struct {
+    int dumps;
+    int edges;
+    int duplicates;
+} edge_id_probe_t;
+
+static void probe_edge_ids(const cbm_gbuf_t *gb, void *ctx) {
+    edge_id_probe_t *probe = ctx;
+    probe->dumps++;
+    probe->edges = cbm_gbuf_edge_count(gb);
+    probe->duplicates = cbm_gbuf_duplicate_edge_ids(gb);
+}
+
+/* `count` Go files; each function calls the next file's. `bump` changes
+ * every body so a second run sees all files as changed. */
+static bool write_id_fixture(const char *repo, int count, int bump) {
+    char path[512];
+    char source[256];
+    for (int i = 0; i < count; i++) {
+        snprintf(path, sizeof(path), "%s/f%02d.go", repo, i);
+        snprintf(source, sizeof(source),
+                 "package main\n\nfunc F%02d() int {\n\treturn F%02d() + %d\n}\n", i,
+                 (i + 1) % count, 1 + bump);
+        if (th_write_file(path, source) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+typedef struct {
+    char base[256];
+    char repo[300];
+    char cache[300];
+    char *saved_cache;
+    char *saved_workers;
+} id_env_t;
+
+static char *id_env_save(const char *name) {
+    const char *v = getenv(name);
+    return v ? strdup(v) : NULL;
+}
+
+static void id_env_restore(const char *name, char *saved) {
+    if (saved) {
+        cbm_setenv(name, saved, 1);
+        free(saved);
+    } else {
+        cbm_unsetenv(name);
+    }
+}
+
+static bool id_env_open(id_env_t *env) {
+    memset(env, 0, sizeof(*env));
+    snprintf(env->base, sizeof(env->base), "/tmp/cbm_par_ids_XXXXXX");
+    if (!cbm_mkdtemp(env->base)) {
+        return false;
+    }
+    snprintf(env->repo, sizeof(env->repo), "%s/repo", env->base);
+    snprintf(env->cache, sizeof(env->cache), "%s/cache", env->base);
+    if (!cbm_mkdir_p(env->repo, 0700) || !cbm_mkdir_p(env->cache, 0700)) {
+        th_rmtree(env->base);
+        return false;
+    }
+    env->saved_cache = id_env_save("CBM_CACHE_DIR");
+    env->saved_workers = id_env_save("CBM_WORKERS");
+    cbm_setenv("CBM_CACHE_DIR", env->cache, 1);
+    /* More than one worker and more files than MIN_FILES_FOR_PARALLEL (50):
+     * the parallel route. */
+    cbm_setenv("CBM_WORKERS", "4", 1);
+    return true;
+}
+
+static void id_env_close(id_env_t *env) {
+    cbm_pipeline_set_id_sync_hook_for_tests(NULL, NULL);
+    cbm_pipeline_set_before_dump_hook_for_tests(NULL, NULL);
+    id_env_restore("CBM_CACHE_DIR", env->saved_cache);
+    id_env_restore("CBM_WORKERS", env->saved_workers);
+    th_rmtree(env->base);
+}
+
+static int id_run_pipeline(const char *repo, cbm_pipeline_route_t *route) {
+    cbm_pipeline_t *p = cbm_pipeline_new(repo, NULL, CBM_MODE_FULL);
+    if (!p) {
+        return CBM_NOT_FOUND;
+    }
+    cbm_pipeline_set_project_name(p, "par-ids");
+    int rc = cbm_pipeline_run(p);
+    if (route) {
+        *route = cbm_pipeline_get_last_route(p);
+    }
+    cbm_pipeline_free(p);
+    return rc;
+}
+
+TEST(parallel_full_index_keeps_edge_ids_unique) {
+    id_env_t env;
+    ASSERT_TRUE(id_env_open(&env));
+    if (!write_id_fixture(env.repo, ID_FILES, 0)) {
+        id_env_close(&env);
+        FAIL("failed to write the edge-id fixture");
+    }
+    id_sync_probe_t syncs = {.push = true};
+    edge_id_probe_t probe = {0};
+    cbm_pipeline_set_id_sync_hook_for_tests(id_sync_hook, &syncs);
+    cbm_pipeline_set_before_dump_hook_for_tests(probe_edge_ids, &probe);
+    cbm_pipeline_route_t route = CBM_PIPELINE_ROUTE_UNKNOWN;
+    int rc = id_run_pipeline(env.repo, &route);
+    id_env_close(&env);
+
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(route, CBM_PIPELINE_ROUTE_FULL);
+    /* Both full-route syncs (after extract, after resolve) go through the helper. */
+    ASSERT_EQ(syncs.syncs, 2);
+    ASSERT_EQ(probe.dumps, 1);
+    ASSERT_GT(probe.edges, ID_FILES);
+    ASSERT_EQ(probe.duplicates, 0);
+    PASS();
+}
+
+TEST(parallel_incremental_keeps_edge_ids_unique) {
+    id_env_t env;
+    ASSERT_TRUE(id_env_open(&env));
+    if (!write_id_fixture(env.repo, ID_FILES, 0)) {
+        id_env_close(&env);
+        FAIL("failed to write the edge-id fixture");
+    }
+    int first_rc = id_run_pipeline(env.repo, NULL);
+    /* Every file changes, more than MIN_FILES_FOR_PARALLEL_INCR (50): the
+     * parallel incremental route. */
+    bool rewritten = write_id_fixture(env.repo, ID_FILES, 1);
+    id_sync_probe_t syncs = {.push = true};
+    edge_id_probe_t probe = {0};
+    cbm_pipeline_set_id_sync_hook_for_tests(id_sync_hook, &syncs);
+    cbm_pipeline_set_before_dump_hook_for_tests(probe_edge_ids, &probe);
+    cbm_pipeline_route_t route = CBM_PIPELINE_ROUTE_UNKNOWN;
+    int second_rc = id_run_pipeline(env.repo, &route);
+    id_env_close(&env);
+
+    ASSERT_EQ(first_rc, 0);
+    ASSERT_TRUE(rewritten);
+    ASSERT_EQ(second_rc, 0);
+    ASSERT_EQ(route, CBM_PIPELINE_ROUTE_INCREMENTAL);
+    ASSERT_EQ(syncs.syncs, 2);
+    ASSERT_EQ(probe.dumps, 1);
+    ASSERT_GT(probe.edges, ID_FILES);
+    ASSERT_EQ(probe.duplicates, 0);
+    PASS();
+}
+
 /* ── Parallel-pipeline LSP-override regression ────────────────────── */
 /* Pin the wiring fix that unified pass_calls.c (sequential) and
  * pass_parallel.c (parallel) on cbm_pipeline_find_lsp_resolution +
@@ -1278,6 +1485,10 @@ SUITE(parallel) {
     RUN_TEST(gbuf_merge_empty_src);
     RUN_TEST(gbuf_merge_src_free_safe);
     RUN_TEST(gbuf_next_id_accessors);
+    RUN_TEST(gbuf_raise_next_id_never_lowers);
+    RUN_TEST(gbuf_duplicate_edge_ids_counts_reused_ids);
+    RUN_TEST(parallel_full_index_keeps_edge_ids_unique);
+    RUN_TEST(parallel_incremental_keeps_edge_ids_unique);
 
     /* Parallel pipeline parity tests */
     RUN_TEST(parallel_node_count);

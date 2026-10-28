@@ -376,6 +376,40 @@ cbm_pipeline_route_t cbm_pipeline_get_last_route(const cbm_pipeline_t *p) {
     return p ? p->last_route : CBM_PIPELINE_ROUTE_UNKNOWN;
 }
 
+/* ── Main-buffer id counter sync after parallel phases (#50) ─────── */
+
+static CBM_TLS void (*g_id_sync_hook)(cbm_gbuf_t *, void *);
+static CBM_TLS void *g_id_sync_hook_ctx;
+static CBM_TLS void (*g_before_dump_hook)(const cbm_gbuf_t *, void *);
+static CBM_TLS void *g_before_dump_hook_ctx;
+
+void cbm_pipeline_set_id_sync_hook_for_tests(void (*hook)(cbm_gbuf_t *, void *), void *ctx) {
+    g_id_sync_hook = hook;
+    g_id_sync_hook_ctx = ctx;
+}
+
+void cbm_pipeline_set_before_dump_hook_for_tests(void (*hook)(const cbm_gbuf_t *, void *),
+                                                 void *ctx) {
+    g_before_dump_hook = hook;
+    g_before_dump_hook_ctx = ctx;
+}
+
+void cbm_pipeline_run_before_dump_hook(const cbm_gbuf_t *gb) {
+    if (g_before_dump_hook) {
+        g_before_dump_hook(gb, g_before_dump_hook_ctx);
+    }
+}
+
+void cbm_pipeline_sync_next_id(cbm_gbuf_t *gb, _Atomic int64_t *shared_ids) {
+    if (g_id_sync_hook) {
+        g_id_sync_hook(gb, g_id_sync_hook_ctx);
+    }
+    /* Raise only. The merge leaves the main counter above the shared one when
+     * merged edges take main-counter ids; lowering it to the shared value
+     * handed those ids out a second time. */
+    cbm_gbuf_raise_next_id(gb, atomic_load(shared_ids));
+}
+
 bool cbm_pipeline_had_format_migration(const cbm_pipeline_t *p) {
     return p && p->format_migration;
 }
@@ -944,7 +978,7 @@ static int run_parallel_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
         free(cache);
         return rc != 0 ? rc : CBM_NOT_FOUND;
     }
-    cbm_gbuf_set_next_id(p->gbuf, atomic_load(&shared_ids));
+    cbm_pipeline_sync_next_id(p->gbuf, &shared_ids);
     /* extract -> registry handoff: return the extract phase's freed-but-retained
      * allocator pages to the OS before registry_build allocates. On a 2x Linux
      * index the extract peak holds ~13 GB of reclaimable pages (peak_mb 20.7 vs
@@ -1050,7 +1084,7 @@ static int run_parallel_passes(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
         }
         free(def_modules);
     }
-    cbm_gbuf_set_next_id(p->gbuf, atomic_load(&shared_ids));
+    cbm_pipeline_sync_next_id(p->gbuf, &shared_ids);
     cbm_pipeline_extract_infra_routes(p->gbuf, files, cache, ctx->spill, file_count);
     cbm_pipeline_process_infra_bindings(p->gbuf, files, cache, ctx->spill, file_count);
     for (int i = 0; i < file_count; i++) {
@@ -1369,6 +1403,7 @@ static int dump_and_persist_hashes(cbm_pipeline_t *p, const cbm_file_info_t *fil
     /* Capture committed counts before preparing the dump, which releases the
      * graph buffer indexes (graph_buffer.c), after which cbm_gbuf_node_count()
      * returns 0 and the #334 plausibility gate would never fire. */
+    cbm_pipeline_run_before_dump_hook(p->gbuf);
     p->committed_nodes = cbm_gbuf_node_count(p->gbuf);
     p->committed_edges = cbm_gbuf_edge_count(p->gbuf);
     int prepare_rc = cbm_gbuf_prepare_zova_dump(p->gbuf);
