@@ -550,6 +550,95 @@ TEST(java_enum_dedup_preserves_calls_issue1234) {
     PASS();
 }
 
+/* Regression for #91: Scala, Solidity and Ruby class bodies were not
+ * recognized by push_class_body_children, so every method was emitted as a
+ * Method and again as a free Function. The rest of the body must still be
+ * walked: Scala vals and Ruby constants are only found by the walk. */
+TEST(scala_class_no_duplicate_function_issue91) {
+    CBMFileResult *r = extract("class A {\n"
+                               "  val limit: Int = 3\n"
+                               "  def foo(): Int = 1\n"
+                               "  object Inner {\n"
+                               "    def innerFoo(): Int = 2\n"
+                               "  }\n"
+                               "}\n"
+                               "trait T {\n"
+                               "  def tFoo(): Int = 5\n"
+                               "}\n",
+                               CBM_LANG_SCALA, "t", "A.scala");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    ASSERT_EQ(count_defs_named(r, "Method", "foo"), 1);
+    ASSERT_EQ(count_defs_named(r, "Method", "innerFoo"), 1);
+    ASSERT_EQ(count_defs_named(r, "Method", "tFoo"), 1);
+    ASSERT_EQ(count_defs_with_label(r, "Function"), 0);
+    ASSERT(has_def(r, "Variable", "limit"));
+
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(solidity_contract_no_duplicate_function_issue91) {
+    CBMFileResult *r =
+        extract("pragma solidity ^0.8.0;\n"
+                "contract B {\n"
+                "    uint256 public total;\n"
+                "    modifier onlyOwner() { _; }\n"
+                "    function foo() public pure returns (uint) { return 1; }\n"
+                "}\n"
+                "interface IB {\n"
+                "    function bar() external;\n"
+                "}\n"
+                "library LB {\n"
+                "    function baz() internal pure returns (uint) { return 2; }\n"
+                "}\n",
+                CBM_LANG_SOLIDITY, "t", "B.sol");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    ASSERT_EQ(count_defs_named(r, "Method", "foo"), 1);
+    ASSERT_EQ(count_defs_named(r, "Method", "onlyOwner"), 1);
+    ASSERT_EQ(count_defs_named(r, "Method", "bar"), 1);
+    ASSERT_EQ(count_defs_named(r, "Method", "baz"), 1);
+    ASSERT_EQ(count_defs_with_label(r, "Function"), 0);
+
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(ruby_class_no_duplicate_function_issue91) {
+    CBMFileResult *r = extract("class C\n"
+                               "  LIMIT = 3\n"
+                               "  def foo\n"
+                               "    1\n"
+                               "  end\n"
+                               "  def self.sfoo\n"
+                               "    2\n"
+                               "  end\n"
+                               "  class << self\n"
+                               "    def cfoo\n"
+                               "      3\n"
+                               "    end\n"
+                               "  end\n"
+                               "end\n",
+                               CBM_LANG_RUBY, "t", "c.rb");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    ASSERT_EQ(count_defs_named(r, "Method", "foo"), 1);
+    ASSERT_EQ(count_defs_named(r, "Function", "foo"), 0);
+    ASSERT_EQ(count_defs_named(r, "Method", "sfoo"), 1);
+    ASSERT_EQ(count_defs_named(r, "Function", "sfoo"), 0);
+    /* Not a direct body member, so extract_class_methods never sees it: the
+     * walk must keep reaching it. */
+    ASSERT(has_def_any(r, "cfoo"));
+    ASSERT(has_def(r, "Variable", "LIMIT"));
+
+    cbm_free_result(r);
+    PASS();
+}
+
 /* Regression for #279: a Java class declaring both `extends` and
  * `implements` must produce one INHERITS edge per base — the extends parent
  * AND every implements interface — with bare type names (not the keyword
@@ -5802,6 +5891,9 @@ SUITE(extraction) {
     RUN_TEST(java_interface);
     RUN_TEST(java_interface_no_duplicate_function_issue1234);
     RUN_TEST(java_enum_dedup_preserves_calls_issue1234);
+    RUN_TEST(scala_class_no_duplicate_function_issue91);
+    RUN_TEST(solidity_contract_no_duplicate_function_issue91);
+    RUN_TEST(ruby_class_no_duplicate_function_issue91);
     RUN_TEST(java_class_extends_and_implements);
     RUN_TEST(python_class_base_extracted_bare);
     RUN_TEST(php_class);

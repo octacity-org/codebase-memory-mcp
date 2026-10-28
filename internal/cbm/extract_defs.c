@@ -6695,6 +6695,34 @@ static void push_class_body_children(TSNode node, const CBMLangSpec *spec, wd_st
         }
         return;
     }
+    /* Scala, Solidity and Ruby class bodies (template_body, contract_body,
+     * body_statement) are not in the kind list below, so the walk fell back to
+     * the class node's children and re-extracted every method as a free
+     * Function next to the Method extract_class_methods emits (#91). Skip only
+     * those method nodes: everything else in the body (vals, type aliases,
+     * constants, nested classes, Ruby `class << self`) is still walked. */
+    if (spec->language == CBM_LANG_SCALA || spec->language == CBM_LANG_SOLIDITY ||
+        spec->language == CBM_LANG_RUBY) {
+        TSNode body = find_class_member_body(node, spec->language);
+        if (!ts_node_is_null(body)) {
+            uint32_t cc = ts_node_child_count(node);
+            for (int ci = (int)cc - SKIP_CHAR; ci >= 0; ci--) {
+                TSNode child = ts_node_child(node, (uint32_t)ci);
+                if (!ts_node_eq(child, body)) {
+                    wd_push(s, child, new_enclosing);
+                    continue;
+                }
+                uint32_t bc = ts_node_child_count(body);
+                for (int bi = (int)bc - SKIP_CHAR; bi >= 0; bi--) {
+                    TSNode member = ts_node_child(body, (uint32_t)bi);
+                    if (!cbm_kind_in_set(member, spec->function_node_types)) {
+                        wd_push(s, member, new_enclosing);
+                    }
+                }
+            }
+            return;
+        }
+    }
     uint32_t nc = ts_node_child_count(node);
     for (uint32_t ci = 0; ci < nc; ci++) {
         TSNode child = ts_node_child(node, ci);
