@@ -5141,6 +5141,123 @@ static void extract_destructured_vars(CBMExtractCtx *ctx, TSNode pattern, TSNode
     }
 }
 
+/* True when text of `node` equals `want` exactly (no arena allocation). */
+static bool js_node_text_is(TSNode node, const char *source, const char *want) {
+    if (ts_node_is_null(node)) {
+        return false;
+    }
+    uint32_t start = ts_node_start_byte(node);
+    uint32_t end = ts_node_end_byte(node);
+    size_t len = strlen(want);
+    return end >= start && (size_t)(end - start) == len && memcmp(source + start, want, len) == 0;
+}
+
+/* #1916: `axios.create(...)` — the factory of a configured axios instance
+ * (the vue-element-admin / RuoYi `request.js` wrapper). Only the literal
+ * `axios` receiver is recognised: a look-alike `factory.create(...)` is not
+ * an HTTP client and must not turn its binding into one. */
+static bool js_is_axios_create_call(TSNode value, const char *source) {
+    if (ts_node_is_null(value) || strcmp(ts_node_type(value), "call_expression") != 0) {
+        return false;
+    }
+    TSNode fn = ts_node_child_by_field_name(value, TS_FIELD("function"));
+    if (ts_node_is_null(fn) || strcmp(ts_node_type(fn), "member_expression") != 0) {
+        return false;
+    }
+    TSNode obj = ts_node_child_by_field_name(fn, TS_FIELD("object"));
+    TSNode prop = ts_node_child_by_field_name(fn, TS_FIELD("property"));
+    return !ts_node_is_null(obj) && strcmp(ts_node_type(obj), "identifier") == 0 &&
+           js_node_text_is(obj, source, "axios") && js_node_text_is(prop, source, "create");
+}
+
+/* The literal `baseURL` of `axios.create({ baseURL: '<lit>' })`, or NULL when
+ * the config is absent, not an object literal, or the value is not a plain
+ * string literal (process.env.X, a template with substitutions, an escape):
+ * an unknown base is never guessed. */
+static const char *js_axios_create_base_url(CBMArena *a, TSNode call, const char *source) {
+    TSNode args = ts_node_child_by_field_name(call, TS_FIELD("arguments"));
+    if (ts_node_is_null(args) || ts_node_named_child_count(args) == 0) {
+        return NULL;
+    }
+    TSNode cfg = ts_node_named_child(args, 0);
+    if (strcmp(ts_node_type(cfg), "object") != 0) {
+        return NULL;
+    }
+    uint32_t n = ts_node_named_child_count(cfg);
+    for (uint32_t i = 0; i < n; i++) {
+        TSNode pair = ts_node_named_child(cfg, i);
+        if (strcmp(ts_node_type(pair), "pair") != 0) {
+            continue;
+        }
+        TSNode key = ts_node_child_by_field_name(pair, TS_FIELD("key"));
+        if (!js_node_text_is(key, source, "baseURL") &&
+            !js_node_text_is(key, source, "'baseURL'") &&
+            !js_node_text_is(key, source, "\"baseURL\"")) {
+            continue;
+        }
+        TSNode val = ts_node_child_by_field_name(pair, TS_FIELD("value"));
+        if (ts_node_is_null(val) || strcmp(ts_node_type(val), "string") != 0) {
+            return NULL;
+        }
+        char *text = cbm_node_text(a, val, source);
+        size_t len = text ? strlen(text) : 0;
+        if (len < PAIR_LEN || strchr(text, '\\') != NULL) {
+            return NULL;
+        }
+        text[len - SKIP_ONE] = '\0';
+        return text + SKIP_ONE;
+    }
+    return NULL;
+}
+
+/* Mark `def` as an axios client instance created by `call` (#1916). */
+static void js_mark_axios_client(CBMArena *a, CBMDefinition *def, TSNode call, const char *source) {
+    def->http_client = "axios";
+    def->http_base_url = js_axios_create_base_url(a, call, source);
+}
+
+/* #1916: `export default api;` (api an axios instance declared above) or
+ * `export default axios.create({...})` makes the MODULE's default export the
+ * client — record it on the Module def so a default import can find it. */
+static void js_mark_default_export_client(CBMExtractCtx *ctx, int mod_idx) {
+    if (mod_idx < 0 || mod_idx >= ctx->result->defs.count) {
+        return;
+    }
+    TSTreeCursor cursor = ts_tree_cursor_new(ctx->root);
+    if (!ts_tree_cursor_goto_first_child(&cursor)) {
+        ts_tree_cursor_delete(&cursor);
+        return;
+    }
+    do {
+        TSNode stmt = ts_tree_cursor_current_node(&cursor);
+        if (strcmp(ts_node_type(stmt), "export_statement") != 0) {
+            continue;
+        }
+        TSNode val = ts_node_child_by_field_name(stmt, TS_FIELD("value"));
+        if (ts_node_is_null(val)) {
+            continue;
+        }
+        CBMDefinition *mod = &ctx->result->defs.items[mod_idx];
+        if (js_is_axios_create_call(val, ctx->source)) {
+            js_mark_axios_client(ctx->arena, mod, val, ctx->source);
+            continue;
+        }
+        if (strcmp(ts_node_type(val), "identifier") != 0) {
+            continue;
+        }
+        for (int d = 0; d < ctx->result->defs.count; d++) {
+            const CBMDefinition *v = &ctx->result->defs.items[d];
+            if (v->http_client && v->label && strcmp(v->label, "Variable") == 0 && v->name &&
+                !v->parent_class && js_node_text_is(val, ctx->source, v->name)) {
+                mod->http_client = v->http_client;
+                mod->http_base_url = v->http_base_url;
+                break;
+            }
+        }
+    } while (ts_tree_cursor_goto_next_sibling(&cursor));
+    ts_tree_cursor_delete(&cursor);
+}
+
 // JS/TS variable extraction: skip function-assigned declarators.
 static void extract_js_vars(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
     uint32_t n = ts_node_named_child_count(node);
@@ -5165,7 +5282,12 @@ static void extract_js_vars(CBMExtractCtx *ctx, TSNode node, CBMArena *a) {
             if (strcmp(nk, "object_pattern") == 0 || strcmp(nk, "array_pattern") == 0) {
                 extract_destructured_vars(ctx, vname, child, a);
             } else {
+                int before = ctx->result->defs.count;
                 push_var_def(ctx, cbm_node_text(a, vname, ctx->source), child);
+                if (ctx->result->defs.count > before &&
+                    js_is_axios_create_call(value, ctx->source)) {
+                    js_mark_axios_client(a, &ctx->result->defs.items[before], value, ctx->source);
+                }
             }
         }
     }
@@ -7306,9 +7428,16 @@ void cbm_extract_definitions(CBMExtractCtx *ctx) {
     mod.end_line = ts_node_end_point(ctx->root).row + TS_LINE_OFFSET;
     mod.is_exported = true;
     mod.is_test = ctx->result->is_test_file;
+    int mod_idx = ctx->result->defs.count;
     cbm_defs_push(&ctx->result->defs, a, mod);
 
     cbm_extract_definitions_without_module(ctx);
+
+    if (ctx->language == CBM_LANG_JAVASCRIPT || ctx->language == CBM_LANG_TYPESCRIPT ||
+        ctx->language == CBM_LANG_TSX) {
+        /* Same language set as extract_js_vars, which marks the bindings. */
+        js_mark_default_export_client(ctx, mod_idx);
+    }
 }
 
 void cbm_extract_definitions_without_module(CBMExtractCtx *ctx) {

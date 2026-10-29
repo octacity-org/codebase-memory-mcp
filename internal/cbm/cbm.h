@@ -230,6 +230,14 @@ typedef struct {
      * `pub const Database = zova.Database;`): the value text, which the
      * cross-file Zig resolver follows. Not stored on the graph node. */
     const char *alias_value;
+    /* JS/TS only (#1916): a module-level binding initialised by
+     * `axios.create(...)` records the client library here ("axios"), and the
+     * literal `baseURL` string (or NULL when absent / not a string literal).
+     * The Module def carries the pair when its default export is such a
+     * client. The call resolver composes `<binding>.get('/p')` into an
+     * HTTP_CALLS edge to base + path. Tail fields: zero-init stays valid. */
+    const char *http_client;
+    const char *http_base_url;
 } CBMDefinition;
 
 /* Argument captured from a call expression */
@@ -281,6 +289,7 @@ typedef struct {
 typedef struct {
     const char *local_name;  // local alias or name
     const char *module_path; // resolved module path / QN
+    bool is_default;         // ES default import (`import X from "Y"`), JS/TS only (#1916)
 } CBMImport;
 
 typedef enum {

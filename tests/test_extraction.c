@@ -5846,6 +5846,90 @@ TEST(extract_variants_only_in_c_preprocessor_languages_c1) {
     PASS();
 }
 
+/* #1916: `axios.create(...)` extraction and module default export client propagation */
+TEST(extract_axios_create_client_and_module_default_export_issue1916) {
+    CBMFileResult *r = extract("import axios from 'axios';\n"
+                               "const api = axios.create({ baseURL: '/api' });\n"
+                               "export default api;\n",
+                               CBM_LANG_TYPESCRIPT, "t", "client.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *var_api = NULL;
+    const CBMDefinition *mod_def = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (r->defs.items[i].name && strcmp(r->defs.items[i].name, "api") == 0) {
+            var_api = &r->defs.items[i];
+        }
+        if (r->defs.items[i].label && strcmp(r->defs.items[i].label, "Module") == 0) {
+            mod_def = &r->defs.items[i];
+        }
+    }
+    ASSERT_NOT_NULL(var_api);
+    ASSERT_NOT_NULL(var_api->http_client);
+    ASSERT_STR_EQ(var_api->http_client, "axios");
+    ASSERT_NOT_NULL(var_api->http_base_url);
+    ASSERT_STR_EQ(var_api->http_base_url, "/api");
+
+    ASSERT_NOT_NULL(mod_def);
+    ASSERT_NOT_NULL(mod_def->http_client);
+    ASSERT_STR_EQ(mod_def->http_client, "axios");
+    ASSERT_NOT_NULL(mod_def->http_base_url);
+    ASSERT_STR_EQ(mod_def->http_base_url, "/api");
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(extract_es_default_import_flag_issue1916) {
+    CBMFileResult *r = extract("import api from './client';\n"
+                               "import { helper } from './util';\n",
+                               CBM_LANG_TYPESCRIPT, "t", "caller.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMImport *imp_default = NULL;
+    const CBMImport *imp_named = NULL;
+    for (int i = 0; i < r->imports.count; i++) {
+        if (r->imports.items[i].local_name && strcmp(r->imports.items[i].local_name, "api") == 0) {
+            imp_default = &r->imports.items[i];
+        }
+        if (r->imports.items[i].local_name && strcmp(r->imports.items[i].local_name, "helper") == 0) {
+            imp_named = &r->imports.items[i];
+        }
+    }
+    ASSERT_NOT_NULL(imp_default);
+    ASSERT_TRUE(imp_default->is_default);
+    ASSERT_NOT_NULL(imp_named);
+    ASSERT_FALSE(imp_named->is_default);
+    cbm_free_result(r);
+    PASS();
+}
+
+TEST(extract_lookalike_create_is_not_client_issue1916) {
+    CBMFileResult *r = extract("const factory = { create: (cfg) => cfg };\n"
+                               "const fakeApi = factory.create({ baseURL: '/api' });\n"
+                               "export default fakeApi;\n",
+                               CBM_LANG_TYPESCRIPT, "t", "fake.ts");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    const CBMDefinition *var_fake = NULL;
+    const CBMDefinition *mod_def = NULL;
+    for (int i = 0; i < r->defs.count; i++) {
+        if (r->defs.items[i].name && strcmp(r->defs.items[i].name, "fakeApi") == 0) {
+            var_fake = &r->defs.items[i];
+        }
+        if (r->defs.items[i].label && strcmp(r->defs.items[i].label, "Module") == 0) {
+            mod_def = &r->defs.items[i];
+        }
+    }
+    ASSERT_NOT_NULL(var_fake);
+    ASSERT_NULL(var_fake->http_client);
+    ASSERT_NULL(var_fake->http_base_url);
+    ASSERT_NOT_NULL(mod_def);
+    ASSERT_NULL(mod_def->http_client);
+    ASSERT_NULL(mod_def->http_base_url);
+    cbm_free_result(r);
+    PASS();
+}
+
 SUITE(extraction) {
     /* Initialize extraction library */
     cbm_init();
@@ -6166,4 +6250,7 @@ SUITE(extraction) {
     RUN_TEST(extract_c_enum_macro_wrapped_list_c1);
     RUN_TEST(extract_c_variants_lists_same_file_duplicates_c1);
     RUN_TEST(extract_variants_only_in_c_preprocessor_languages_c1);
+    RUN_TEST(extract_axios_create_client_and_module_default_export_issue1916);
+    RUN_TEST(extract_es_default_import_flag_issue1916);
+    RUN_TEST(extract_lookalike_create_is_not_client_issue1916);
 }

@@ -798,6 +798,293 @@ TEST(pipeline_incremental_preserves_cross_file_calls) {
  * local calls must still resolve. < 50 files → sequential path (pass_calls.c).
  * RED before the fix: checkFormat->test exists via unique_name/suffix_match. */
 static void write_temp_file(const char *dir, const char *name, const char *content);
+
+/* Count only edges of `edge_type` between the exact named source/target nodes.
+ * The parity and incremental guards deliberately use unique symbol names, so
+ * this canonicalizes across independent stores without depending on node IDs
+ * or project-prefixed qualified names. */
+static int named_edge_count(cbm_store_t *s, const char *project, const char *edge_type,
+                            const char *source_name, const char *target_name) {
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    if (cbm_store_find_edges_by_type(s, project, edge_type, &edges, &edge_count) != CBM_STORE_OK) {
+        return -1;
+    }
+
+    int matches = 0;
+    for (int i = 0; i < edge_count; i++) {
+        cbm_node_t source = {0};
+        cbm_node_t target = {0};
+        int source_ok = cbm_store_find_node_by_id(s, edges[i].source_id, &source) == CBM_STORE_OK;
+        int target_ok = cbm_store_find_node_by_id(s, edges[i].target_id, &target) == CBM_STORE_OK;
+        if (source_ok && target_ok && source.name && target.name &&
+            strcmp(source.name, source_name) == 0 && strcmp(target.name, target_name) == 0) {
+            matches++;
+        }
+        cbm_node_free_fields(&source);
+        cbm_node_free_fields(&target);
+    }
+    if (edges) {
+        cbm_store_free_edges(edges, edge_count);
+    }
+    return matches;
+}
+
+/* #1916: one index of the axios-wrapper fixture, reduced to the edge counts
+ * the test asserts. */
+typedef struct {
+    int run_rc;
+    int wrapper_http;        /* loadWrapperOrders -HTTP_CALLS-> <base>/orders */
+    int wrapper_http_v3;     /* same call after the wrapper's base moves to /v3 */
+    int wrapper_http_v3_inv; /* ... and then the caller's path moves to /invoices */
+    int wrapper_raw_http;    /* loadWrapperOrders -HTTP_CALLS-> /orders (uncomposed) */
+    int wrapper_route_reg;   /* loadWrapperOrders -CALLS-> /orders (phantom route reg) */
+    int named_http;          /* named import, base with trailing '/' */
+    int local_http;          /* same-file instance spelled axiosInstance */
+    int local_raw_http;      /* ... uncomposed (the #523 spelling match) */
+    int dynamic_http;        /* non-literal baseURL: path kept, never guessed */
+    int dynamic_route_reg;   /* ... misread as a route registration */
+    int direct_http;         /* control: axios.get('/direct') */
+    int fake_http;           /* look-alike factory.create: never a client */
+    int provider_handles;    /* control: Express app.get stays a registration */
+} AxiosWrapperObs;
+
+static AxiosWrapperObs observe_axios_wrapper(const char *repo, const char *db) {
+    (void)db;
+    AxiosWrapperObs o;
+    memset(&o, 0xff, sizeof(o)); /* -1 everywhere: "not observed" */
+    cbm_pipeline_t *p = cbm_pipeline_new(repo, NULL, CBM_MODE_FULL);
+    if (!p) {
+        return o;
+    }
+    o.run_rc = cbm_pipeline_run(p);
+    const char *proj = cbm_pipeline_project_name(p);
+    cbm_store_t *s = th_open_repo_store(repo);
+    if (s && proj) {
+        o.wrapper_http =
+            named_edge_count(s, proj, "HTTP_CALLS", "loadWrapperOrders", "/api/orders");
+        o.wrapper_http_v3 =
+            named_edge_count(s, proj, "HTTP_CALLS", "loadWrapperOrders", "/v3/orders");
+        o.wrapper_http_v3_inv =
+            named_edge_count(s, proj, "HTTP_CALLS", "loadWrapperOrders", "/v3/invoices");
+        o.wrapper_raw_http =
+            named_edge_count(s, proj, "HTTP_CALLS", "loadWrapperOrders", "/orders");
+        o.wrapper_route_reg = named_edge_count(s, proj, "CALLS", "loadWrapperOrders", "/orders");
+        o.named_http = named_edge_count(s, proj, "HTTP_CALLS", "loadNamedItems", "/v2/items");
+        o.local_http = named_edge_count(s, proj, "HTTP_CALLS", "loadLocal", "/local/x");
+        o.local_raw_http = named_edge_count(s, proj, "HTTP_CALLS", "loadLocal", "/x");
+        o.dynamic_http = named_edge_count(s, proj, "HTTP_CALLS", "loadDynamic", "/dynamic");
+        o.dynamic_route_reg = named_edge_count(s, proj, "CALLS", "loadDynamic", "/dynamic");
+        o.direct_http = named_edge_count(s, proj, "HTTP_CALLS", "loadDirectOrders", "/direct");
+        o.fake_http = named_edge_count(s, proj, "HTTP_CALLS", "loadFake", "/api/fake");
+        o.provider_handles = named_edge_count(s, proj, "HANDLES", "provideOrders", "/api/orders");
+    }
+    if (s) {
+        cbm_store_close(s);
+    }
+    cbm_pipeline_free(p);
+    return o;
+}
+
+static const char *const AXIOS_CLIENT_V1 =
+    "import axios from 'axios';\n"
+    "const api = axios.create({ baseURL: '/api', timeout: 5000 });\n"
+    "export default api;\n";
+
+static const char *const AXIOS_CLIENT_V3 =
+    "import axios from 'axios';\n"
+    "const api = axios.create({ baseURL: '/v3' });\n"
+    "export default api;\n";
+
+static const char *const AXIOS_ORDERS_V1 =
+    "import api from './client';\n"
+    "import axios from 'axios';\n"
+    "export function loadWrapperOrders(): unknown { return api.get('/orders'); }\n"
+    "export function loadDirectOrders(): unknown { return axios.get('/direct'); }\n";
+
+static const char *const AXIOS_ORDERS_V2 =
+    "import api from './client';\n"
+    "import axios from 'axios';\n"
+    "export function loadWrapperOrders(): unknown { return api.get('/invoices'); }\n"
+    "export function loadDirectOrders(): unknown { return axios.get('/direct'); }\n";
+
+static void populate_axios_wrapper_repo(const char *dir, const char *client_code,
+                                        const char *orders_code) {
+    write_temp_file(dir, "src/client.ts", client_code);
+    write_temp_file(dir, "src/orders.ts", orders_code);
+    write_temp_file(dir, "src/named-client.ts",
+                    "import axios from 'axios';\n"
+                    "export const http = axios.create({ baseURL: '/v2/' });\n");
+    write_temp_file(dir, "src/named-caller.ts",
+                    "import { http } from './named-client';\n"
+                    "export function loadNamedItems(): unknown { return http.post('/items'); }\n");
+    write_temp_file(dir, "src/local.ts",
+                    "import axios from 'axios';\n"
+                    "const axiosInstance = axios.create({ baseURL: '/local' });\n"
+                    "export function loadLocal(): unknown { return axiosInstance.get('/x'); }\n");
+    write_temp_file(dir, "src/dynamic-client.ts",
+                    "import axios from 'axios';\n"
+                    "const dynamicApi = axios.create({ baseURL: process.env.API_BASE });\n"
+                    "export default dynamicApi;\n");
+    write_temp_file(
+        dir, "src/dynamic-caller.ts",
+        "import dynamicApi from './dynamic-client';\n"
+        "export function loadDynamic(): unknown { return dynamicApi.get('/dynamic'); }\n");
+    write_temp_file(dir, "src/fake-client.ts",
+                    "const factory = { create: (config: unknown) => config };\n"
+                    "export default factory;\n");
+    write_temp_file(dir, "src/fake-caller.ts",
+                    "import fakeApi from './fake-client';\n"
+                    "export function loadFake(): unknown { return fakeApi.get('/fake'); }\n");
+    write_temp_file(dir, "src/provider.ts",
+                    "import express from 'express';\n"
+                    "const app = express();\n"
+                    "function provideOrders(): void {}\n"
+                    "app.get('/api/orders', provideOrders);\n");
+    for (int i = 0; i < 52; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "src/wrapper_pad_%02d.ts", i);
+        snprintf(body, sizeof(body), "export function wrapperPad%02d(): number { return %d; }\n", i,
+                 i);
+        write_temp_file(dir, name, body);
+    }
+}
+
+/* #1916: `const api = axios.create({ baseURL: '/api' }); export default api`
+ * in one module and `api.get('/orders')` in another is THE Vue-admin wrapper
+ * pattern. The call must become HTTP_CALLS to GET /api/orders — before the
+ * fix the `.get` suffix made it an Express route REGISTRATION (a CALLS edge
+ * to a phantom server route /orders) and cross-repo matching found nothing.
+ * 52 fillers put the default run on the parallel resolver; the
+ * single-thread run is the sequential oracle; a same-DB reindex after the
+ * wrapper's base changes must converge with the fresh index. */
+TEST(pipeline_axios_wrapper_baseurl_composes_http_calls_issue1916) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "/tmp/cbm_axios_wrapper_XXXXXX");
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    char tmp_fresh[256];
+    snprintf(tmp_fresh, sizeof(tmp_fresh), "/tmp/cbm_axios_fresh_XXXXXX");
+    if (!cbm_mkdtemp(tmp_fresh)) {
+        th_rmtree(tmp);
+        FAIL("tmpdir");
+    }
+    char tmp_fresh2[256];
+    snprintf(tmp_fresh2, sizeof(tmp_fresh2), "/tmp/cbm_axios_fresh2_XXXXXX");
+    if (!cbm_mkdtemp(tmp_fresh2)) {
+        th_rmtree(tmp);
+        th_rmtree(tmp_fresh);
+        FAIL("tmpdir");
+    }
+
+    populate_axios_wrapper_repo(tmp, AXIOS_CLIENT_V1, AXIOS_ORDERS_V1);
+
+    char *old_workers = getenv("CBM_WORKERS");
+    char *saved_workers = old_workers ? strdup(old_workers) : NULL;
+    char *old_single = getenv("CBM_INDEX_SINGLE_THREAD");
+    char *saved_single = old_single ? strdup(old_single) : NULL;
+
+    char *project = cbm_project_name_from_path(tmp);
+    th_remove_project_workspace(project);
+
+    cbm_setenv("CBM_INDEX_SINGLE_THREAD", "1", 1);
+    AxiosWrapperObs seq = observe_axios_wrapper(tmp, NULL);
+    cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+
+    /* Clear workspace so parallel run starts fresh and builds the base generation */
+    th_remove_project_workspace(project);
+    free(project);
+
+    cbm_setenv("CBM_WORKERS", "4", 1);
+    AxiosWrapperObs par = observe_axios_wrapper(tmp, NULL);
+
+    /* Only the wrapper changes; the importing caller is untouched.
+     * Keep workspace so this reindex exercises the incremental route. */
+    write_temp_file(tmp, "src/client.ts", AXIOS_CLIENT_V3);
+    AxiosWrapperObs incr = observe_axios_wrapper(tmp, NULL);
+
+    /* Fresh full index of the mutated tree in tmp_fresh for comparison. */
+    populate_axios_wrapper_repo(tmp_fresh, AXIOS_CLIENT_V3, AXIOS_ORDERS_V1);
+    char *project_fresh = cbm_project_name_from_path(tmp_fresh);
+    th_remove_project_workspace(project_fresh);
+    free(project_fresh);
+    AxiosWrapperObs fresh = observe_axios_wrapper(tmp_fresh, NULL);
+
+    /* Then only the caller changes; the (unchanged) wrapper's base must
+     * still be found when the caller alone is re-resolved. */
+    write_temp_file(tmp, "src/orders.ts", AXIOS_ORDERS_V2);
+    AxiosWrapperObs incr2 = observe_axios_wrapper(tmp, NULL);
+
+    /* Fresh full index of the second mutation in tmp_fresh2 for comparison. */
+    populate_axios_wrapper_repo(tmp_fresh2, AXIOS_CLIENT_V3, AXIOS_ORDERS_V2);
+    char *project_fresh2 = cbm_project_name_from_path(tmp_fresh2);
+    th_remove_project_workspace(project_fresh2);
+    free(project_fresh2);
+    AxiosWrapperObs fresh2 = observe_axios_wrapper(tmp_fresh2, NULL);
+
+    if (saved_workers) {
+        cbm_setenv("CBM_WORKERS", saved_workers, 1);
+        free(saved_workers);
+    } else {
+        cbm_unsetenv("CBM_WORKERS");
+    }
+    if (saved_single) {
+        cbm_setenv("CBM_INDEX_SINGLE_THREAD", saved_single, 1);
+        free(saved_single);
+    } else {
+        cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+    }
+
+    char *p_clean = cbm_project_name_from_path(tmp);
+    th_remove_project_workspace(p_clean);
+    free(p_clean);
+    char *pf_clean = cbm_project_name_from_path(tmp_fresh);
+    th_remove_project_workspace(pf_clean);
+    free(pf_clean);
+    char *pf2_clean = cbm_project_name_from_path(tmp_fresh2);
+    th_remove_project_workspace(pf2_clean);
+    free(pf2_clean);
+
+    th_rmtree(tmp);
+    th_rmtree(tmp_fresh);
+    th_rmtree(tmp_fresh2);
+
+    ASSERT_EQ(seq.run_rc, 0);
+    ASSERT_EQ(par.run_rc, 0);
+    /* Controls: direct axios and an Express registration are unchanged, and
+     * a look-alike factory never becomes a client. */
+    ASSERT_EQ(seq.direct_http, 1);
+    ASSERT_EQ(seq.provider_handles, 1);
+    ASSERT_EQ(seq.fake_http, 0);
+
+    /* The issue: default-imported wrapper composes base + path. */
+    ASSERT_EQ(seq.wrapper_http, 1);
+    ASSERT_EQ(seq.wrapper_raw_http, 0);
+    ASSERT_EQ(seq.wrapper_route_reg, 0);
+    ASSERT_EQ(seq.named_http, 1);
+    ASSERT_EQ(seq.local_http, 1);
+    ASSERT_EQ(seq.local_raw_http, 0);
+    ASSERT_EQ(seq.dynamic_http, 1);
+    ASSERT_EQ(seq.dynamic_route_reg, 0);
+
+    /* Sequential and parallel resolvers agree edge for edge. */
+    ASSERT_MEM_EQ(&seq, &par, sizeof(seq));
+
+    /* Reindex after the base moved converges with a fresh index. */
+    ASSERT_EQ(fresh.run_rc, 0);
+    ASSERT_EQ(fresh.wrapper_http_v3, 1);
+    ASSERT_EQ(fresh.wrapper_http, 0);
+    ASSERT_EQ(incr.run_rc, 0);
+    ASSERT_MEM_EQ(&incr, &fresh, sizeof(fresh));
+    ASSERT_EQ(fresh2.run_rc, 0);
+    ASSERT_EQ(fresh2.wrapper_http_v3_inv, 1);
+    ASSERT_EQ(fresh2.wrapper_http_v3, 0);
+    ASSERT_MEM_EQ(&incr2, &fresh2, sizeof(fresh2));
+    PASS();
+}
+
 TEST(pipeline_tsjs_receiver_suppresses_weak_method_edge) {
     char tmp[256];
     snprintf(tmp, sizeof(tmp), "/tmp/cbm_tsjs_recv_XXXXXX");
@@ -10070,6 +10357,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_calls_resolution);
     RUN_TEST(pipeline_incremental_preserves_cross_file_calls);
     RUN_TEST(pipeline_tsjs_receiver_suppresses_weak_method_edge);
+    RUN_TEST(pipeline_axios_wrapper_baseurl_composes_http_calls_issue1916);
     RUN_TEST(pipeline_tsjs_receiver_parallel_keeps_service_edges);
     RUN_TEST(pipeline_python_receiver_suppresses_weak_method_edge);
     RUN_TEST(pipeline_go_rw_usage_never_cross_into_c);
