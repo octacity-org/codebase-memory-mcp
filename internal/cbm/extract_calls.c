@@ -5,6 +5,7 @@
 #include "extract_unified.h"
 #include "foundation/constants.h"
 #include "extract_node_stack.h"
+#include "service_patterns.h" // cbm_service_pattern_route_method (#952)
 #include "tree_sitter/api.h" // TSNode, ts_node_*
 #include <stdint.h>          // uint32_t
 #include <stdio.h>
@@ -1358,6 +1359,56 @@ static void process_keyword_arg(CBMExtractCtx *ctx, TSNode arg_node, CBMCallArg 
     }
 }
 
+static const char *extract_string_value(CBMExtractCtx *ctx, TSNode val_node);
+
+/* A JS/TS request-config object -- `http({url: `/users/${id}`, method: 'GET'})`,
+ * `axios({url: '/orders'})`, the shape Orval and similar generators emit -- names
+ * its request URL in the `url` property. Return that URL (template literals
+ * flattened to the canonical "{}" form, like a bare template argument), or NULL.
+ * Only the `url` key counts: `path`/`endpoint` in an options object name other
+ * things too often. Route registrations are excluded: an object there is the
+ * route definition (Fastify `route({url, handler})`), not a client request, and
+ * its handler lives inside the object where the route pass cannot read it. So is
+ * axios `getUri(config)`: it takes the same config but only formats the URL and
+ * sends nothing (Orval's `get<Op>Url` helpers). (#2235) */
+static bool config_object_callee_eligible(const CBMExtractCtx *ctx, const char *callee_name) {
+    if (ctx->language != CBM_LANG_JAVASCRIPT && ctx->language != CBM_LANG_TYPESCRIPT &&
+        ctx->language != CBM_LANG_TSX) {
+        return false;
+    }
+    if (!callee_name || cbm_service_pattern_route_method(callee_name) != NULL) {
+        return false;
+    }
+    static const char get_uri[] = "getUri";
+    size_t clen = strlen(callee_name);
+    size_t glen = sizeof(get_uri) - 1;
+    return !(clen >= glen && strcmp(callee_name + clen - glen, get_uri) == 0);
+}
+
+static const char *js_config_object_url(CBMExtractCtx *ctx, TSNode obj, const char *callee_name) {
+    if (strcmp(ts_node_type(obj), "object") != 0 ||
+        !config_object_callee_eligible(ctx, callee_name)) {
+        return NULL;
+    }
+    uint32_t n = ts_node_named_child_count(obj);
+    for (uint32_t i = 0; i < n; i++) {
+        TSNode pair = ts_node_named_child(obj, i);
+        if (strcmp(ts_node_type(pair), "pair") != 0) {
+            continue;
+        }
+        TSNode key_n = ts_node_child_by_field_name(pair, TS_FIELD("key"));
+        TSNode val_n = ts_node_child_by_field_name(pair, TS_FIELD("value"));
+        if (ts_node_is_null(key_n) || ts_node_is_null(val_n)) {
+            continue;
+        }
+        const char *key = strip_quotes(ctx->arena, cbm_node_text(ctx->arena, key_n, ctx->source));
+        if (key && strcmp(key, "url") == 0) {
+            return extract_string_value(ctx, val_n);
+        }
+    }
+    return NULL;
+}
+
 /* Extract all arguments from a call expression into call->args[]. */
 static void extract_call_args(CBMExtractCtx *ctx, TSNode args, CBMCall *call) {
     uint32_t argc = ts_node_named_child_count(args);
@@ -1386,6 +1437,10 @@ static void extract_call_args(CBMExtractCtx *ctx, TSNode args, CBMCall *call) {
                 ca->value = cbm_template_string_text(ctx->arena, arg_node, ctx->source);
             } else if (strcmp(ak, "identifier") == 0 && ca->expr) {
                 ca->value = lookup_string_constant(ctx, ca->expr);
+            } else if (strcmp(ak, "object") == 0) {
+                /* Request-config object: its `url` is what the arg-url
+                 * heuristic reads for a local fetch wrapper (#2235). */
+                ca->value = js_config_object_url(ctx, arg_node, call->callee_name);
             } else if (strcmp(ak, "call_expression") == 0) {
                 /* URL-builder helper call (issue #1009): resolve
                  * client(buildPath(id)) through the per-file builder map. */
@@ -1650,7 +1705,8 @@ static TSNode swift_unwrap_url_constructor(CBMExtractCtx *ctx, TSNode arg) {
 }
 
 // Extract URL/topic from keyword or positional args.
-static const char *extract_url_or_topic_arg(CBMExtractCtx *ctx, TSNode args) {
+static const char *extract_url_or_topic_arg(CBMExtractCtx *ctx, TSNode args,
+                                            const char *callee_name) {
     uint32_t nc = ts_node_named_child_count(args);
     for (uint32_t ai = 0; ai < nc; ai++) {
         TSNode arg = ts_node_named_child(args, ai);
@@ -1672,6 +1728,15 @@ static const char *extract_url_or_topic_arg(CBMExtractCtx *ctx, TSNode args) {
 
         if (strcmp(ak, "keyword_argument") == 0 || strcmp(ak, "pair") == 0) {
             const char *val = extract_keyword_url(ctx, arg);
+            if (val) {
+                return val;
+            }
+            continue;
+        }
+
+        /* JS/TS request-config object: `axios({url: '/orders'})` (#2235). */
+        if (strcmp(ak, "object") == 0) {
+            const char *val = js_config_object_url(ctx, arg, callee_name);
             if (val) {
                 return val;
             }
@@ -2231,7 +2296,7 @@ void handle_calls(CBMExtractCtx *ctx, TSNode node, const CBMLangSpec *spec, Walk
                 args = elixir_call_arguments_fallback(node);
             }
             if (!ts_node_is_null(args)) {
-                call.first_string_arg = extract_url_or_topic_arg(ctx, args);
+                call.first_string_arg = extract_url_or_topic_arg(ctx, args, call.callee_name);
                 if (call.first_string_arg && call.first_string_arg[0] == '/') {
                     call.second_arg_name = extract_handler_arg(ctx, args);
                 }

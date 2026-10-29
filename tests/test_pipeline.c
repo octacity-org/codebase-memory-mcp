@@ -7779,6 +7779,98 @@ TEST(pipeline_swift_http_call_makes_route_issue1892) {
     PASS();
 }
 
+/* Count only edges of `edge_type` between the exact named source/target nodes. */
+static int named_edge_count(cbm_store_t *s, const char *project, const char *edge_type,
+                            const char *source_name, const char *target_name) {
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    if (cbm_store_find_edges_by_type(s, project, edge_type, &edges, &edge_count) != CBM_STORE_OK) {
+        return -1;
+    }
+
+    int matches = 0;
+    for (int i = 0; i < edge_count; i++) {
+        cbm_node_t source = {0};
+        cbm_node_t target = {0};
+        int source_ok = cbm_store_find_node_by_id(s, edges[i].source_id, &source) == CBM_STORE_OK;
+        int target_ok = cbm_store_find_node_by_id(s, edges[i].target_id, &target) == CBM_STORE_OK;
+        if (source_ok && target_ok && source.name && target.name &&
+            strcmp(source.name, source_name) == 0 && strcmp(target.name, target_name) == 0) {
+            matches++;
+        }
+        cbm_node_free_fields(&source);
+        cbm_node_free_fields(&target);
+    }
+    if (edges) {
+        cbm_store_free_edges(edges, edge_count);
+    }
+    return matches;
+}
+
+/* #2235: an Orval-style generated client passes its URL inside a request
+ * config object to a LOCAL helper -- `http({url: `/api/customers/${id}`,
+ * method: 'GET'})`. The template literal itself already canonicalizes to
+ * "/api/customers/{}"; what was lost is the object wrapper: the arg-url
+ * heuristic only read bare string/template arguments, so the call produced
+ * no HTTP_CALLS edge and cross-repo matching had nothing to join. Parallel
+ * resolver (> 50 files), where the arg-url heuristic lives. A config object
+ * without a `url` key must not mint a route. */
+TEST(pipeline_ts_config_object_url_http_calls_issue2235) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s/cbm_i2235_XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "src/http.ts",
+                    "export const http = <T,>(config: { url: string; method: string }): "
+                    "Promise<T> => {\n"
+                    "  return fetch(config.url, { method: config.method }).then((r) => r.json());\n"
+                    "};\n");
+    write_temp_file(
+        tmp, "src/gen/customer-controller.ts",
+        "import { http } from '../http';\n"
+        "export const get1 = (id: string, signal?: AbortSignal) => {\n"
+        "  return http<unknown>({url: `/api/customers/${id}`, method: 'GET', signal});\n"
+        "};\n"
+        "export const noUrl = () => {\n"
+        "  return http<unknown>({path: '/api/ignored/x', method: 'GET'});\n"
+        "};\n");
+    for (int i = 0; i < 52; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "src/filler%d.ts", i);
+        snprintf(body, sizeof(body), "export function filler%d(): number { return %d; }\n", i, i);
+        write_temp_file(tmp, name, body);
+    }
+
+    char *old_workers = getenv("CBM_WORKERS");
+    char *saved = old_workers ? strdup(old_workers) : NULL;
+    cbm_setenv("CBM_WORKERS", "4", 1);
+
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, NULL, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+    cbm_store_t *s = th_open_repo_store(tmp);
+    ASSERT_NOT_NULL(s);
+
+    /* RED before the fix: the url inside the config object was never read. */
+    ASSERT_EQ(named_edge_count(s, project, "HTTP_CALLS", "get1", "/api/customers/{}"), 1);
+    /* Only the `url` key names the request URL. */
+    ASSERT_EQ(count_nodes_named(s, project, "/api/ignored/x"), 0);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    if (saved) {
+        cbm_setenv("CBM_WORKERS", saved, 1);
+        free(saved);
+    } else {
+        cbm_unsetenv("CBM_WORKERS");
+    }
+    th_rmtree(tmp);
+    PASS();
+}
+
 /* A changed config file must get its infra Route back, matched to the handler
  * a full index would pick. */
 TEST(pipeline_incremental_infra_route_change_matches_fresh_full) {
@@ -10267,6 +10359,7 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_incremental_infra_route_change_matches_fresh_full);
     RUN_TEST(pipeline_swift_nested_url_makes_route_issue1892);
     RUN_TEST(pipeline_swift_http_call_makes_route_issue1892);
+    RUN_TEST(pipeline_ts_config_object_url_http_calls_issue2235);
     RUN_TEST(pipeline_arg_url_rejects_non_http_slash_arguments);
     RUN_TEST(pipeline_incremental_shared_infra_url_survives_owner_change);
     RUN_TEST(pipeline_incremental_handler_change_rematches_infra_route);
