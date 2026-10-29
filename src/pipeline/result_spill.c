@@ -32,7 +32,7 @@
 _Static_assert(sizeof(CBMDefinition) == 232, "update result_spill.c for CBMDefinition");
 _Static_assert(sizeof(CBMCall) == 312, "update result_spill.c for CBMCall");
 _Static_assert(sizeof(CBMCallArg) == 32, "update result_spill.c for CBMCallArg");
-_Static_assert(sizeof(CBMImport) == 16, "update result_spill.c for CBMImport");
+_Static_assert(sizeof(CBMImport) == 24, "update result_spill.c for CBMImport");
 _Static_assert(sizeof(CBMUsage) == 32, "update result_spill.c for CBMUsage");
 _Static_assert(sizeof(CBMThrow) == 16, "update result_spill.c for CBMThrow");
 _Static_assert(sizeof(CBMReadWrite) == 24, "update result_spill.c for CBMReadWrite");

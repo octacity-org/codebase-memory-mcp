@@ -52,6 +52,18 @@ static inline void *intptr_to_ptr(intptr_t v) {
     return p;
 }
 
+/* ── Global pkgmap (one active pipeline at a time) ─────────────── */
+
+static CBMHashTable *g_pkgmap = NULL;
+
+CBMHashTable *cbm_pipeline_get_pkgmap(void) {
+    return g_pkgmap;
+}
+
+void cbm_pipeline_set_pkgmap(CBMHashTable *map) {
+    g_pkgmap = map;
+}
+
 /* ── Internal state ──────────────────────────────────────────────── */
 
 struct cbm_pipeline {
@@ -900,6 +912,7 @@ static int run_sequential_pipeline(cbm_pipeline_t *p, cbm_pipeline_ctx_t *ctx,
      * workspace imports like `@my/pkg` resolve to their target Module. */
     ctx->pkgmap = cbm_pkgmap_build_from_repo(ctx->repo_path, files, file_count, ctx->project_name,
                                              ctx->excluded_dirs, ctx->excluded_count);
+    cbm_pipeline_set_pkgmap(ctx->pkgmap);
 
     CBMFileResult **seq_cache = (CBMFileResult **)calloc(file_count, sizeof(CBMFileResult *));
     if (seq_cache) {
@@ -1650,6 +1663,7 @@ int cbm_pipeline_run(cbm_pipeline_t *p) {
 cleanup:
     cbm_pkgmap_free(ctx.pkgmap);
     ctx.pkgmap = NULL;
+    cbm_pipeline_set_pkgmap(NULL);
     cbm_discover_free(files, file_count);
     cbm_gbuf_free(p->gbuf);
     p->gbuf = NULL;

@@ -205,6 +205,7 @@ GRAPH_BUFFER_SRCS = src/graph_buffer/graph_buffer.c
 PIPELINE_SRCS = \
     src/pipeline/fqn.c \
     src/pipeline/path_alias.c \
+    src/pipeline/laravel_routing.c \
     src/pipeline/registry.c \
     src/pipeline/pipeline.c \
     src/pipeline/pipeline_incremental.c \

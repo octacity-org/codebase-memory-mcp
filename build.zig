@@ -567,6 +567,7 @@ const native_sources = [_][]const u8{
     "src/graph_buffer/graph_buffer.c",
     "src/pipeline/fqn.c",
     "src/pipeline/path_alias.c",
+    "src/pipeline/laravel_routing.c",
     "src/pipeline/registry.c",
     "src/pipeline/pipeline.c",
     "src/pipeline/pipeline_incremental.c",
