@@ -17,6 +17,7 @@
 #include "discover/discover.h"
 #include "foundation/hash_table.h"
 #include "cbm.h"
+#include "service_patterns.h" /* cbm_svc_kind_t */
 #include "lsp/go_lsp.h" /* CBMLSPDef for cbm_parallel_resolve cross-LSP inputs */
 #include <stdatomic.h>
 #include <string.h>
@@ -181,6 +182,29 @@ const cbm_gbuf_node_t *cbm_pipeline_resolve_import_node(const cbm_pipeline_ctx_t
                                                         const char *source_file_qn,
                                                         const CBMImport *imp,
                                                         CBMHashTable *namespace_map);
+
+/* A call whose callee an import binds to an EXTERNAL library:
+ * `send(...)` under `from paho.mqtt import publish as send`,
+ * `navigate(...)` under `import { get as navigate } from 'axios'`. Spells the
+ * callee as its import makes it (paho.mqtt.publish, axios.get), runs the
+ * service patterns on that name, and returns CBM_SVC_HTTP or CBM_SVC_ASYNC
+ * (writing the spelled name to `spelled`) for an HTTP request -- the spelled
+ * name ends in a request verb, so urllib.parse.urljoin is none -- with a URL
+ * argument, or a messaging call with a URL or topic argument; CBM_SVC_NONE
+ * otherwise.
+ *
+ * Callers ask only when the registry found nothing or only a weak name match
+ * (cbm_registry_strategy_is_weak): the import binding is better evidence than
+ * a same-named symbol elsewhere in the project. A project import (its name is
+ * in imp_keys, the file's resolved import map), a relative import, a name
+ * bound by two different imports, a Python callee rebound as a parameter, and
+ * every call the route-suffix and global-fetch fallbacks own are left alone.
+ * Python and JS/TS. Both call resolvers call this, so they cannot diverge. */
+cbm_svc_kind_t cbm_pipeline_external_import_service(CBMLanguage lang,
+                                                    const CBMImportArray *imports,
+                                                    const char **imp_keys, int imp_count,
+                                                    const CBMCall *call, char *spelled,
+                                                    size_t spelled_sz);
 
 /* Build a namespace → File-node-QN map from a set of extraction results.
  * Each result that declared a namespace/package contributes one entry keyed by

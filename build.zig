@@ -607,6 +607,7 @@ const native_sources = [_][]const u8{
     "internal/cbm/extract_imports.c",
     "internal/cbm/extract_usages.c",
     "internal/cbm/extract_unified.c",
+    "internal/cbm/extract_url_fold.c",
     "internal/cbm/extract_semantic.c",
     "internal/cbm/extract_type_refs.c",
     "internal/cbm/extract_type_assigns.c",

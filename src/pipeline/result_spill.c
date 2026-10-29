@@ -30,9 +30,9 @@
 
 #if UINTPTR_MAX == UINT64_MAX
 _Static_assert(sizeof(CBMDefinition) == 232, "update result_spill.c for CBMDefinition");
-_Static_assert(sizeof(CBMCall) == 312, "update result_spill.c for CBMCall");
-_Static_assert(sizeof(CBMCallArg) == 32, "update result_spill.c for CBMCallArg");
-_Static_assert(sizeof(CBMImport) == 16, "update result_spill.c for CBMImport");
+_Static_assert(sizeof(CBMCall) == 376, "update result_spill.c for CBMCall");
+_Static_assert(sizeof(CBMCallArg) == 40, "update result_spill.c for CBMCallArg");
+_Static_assert(sizeof(CBMImport) == 24, "update result_spill.c for CBMImport");
 _Static_assert(sizeof(CBMUsage) == 32, "update result_spill.c for CBMUsage");
 _Static_assert(sizeof(CBMThrow) == 16, "update result_spill.c for CBMThrow");
 _Static_assert(sizeof(CBMReadWrite) == 24, "update result_spill.c for CBMReadWrite");
@@ -278,13 +278,14 @@ static void dec_def(spill_rd_t *r, CBMDefinition *x) {
 }
 
 #define CALL_STRS(X) X(callee_name) X(enclosing_func_qn) X(first_string_arg) X(second_arg_name)
-#define ARG_STRS(X) X(expr) X(value) X(keyword)
+#define ARG_STRS(X) X(expr) X(value) X(url_value) X(keyword)
 
 static void null_call(CBMCall *x) {
     CALL_STRS(NULL_FIELD)
     for (int i = 0; i < CBM_MAX_CALL_ARGS; i++) {
         x->args[i].expr = NULL;
         x->args[i].value = NULL;
+        x->args[i].url_value = NULL;
         x->args[i].keyword = NULL;
     }
 }
@@ -294,6 +295,7 @@ static void enc_call(spill_buf_t *b, const CBMCall *x) {
     for (int i = 0; i < CBM_MAX_CALL_ARGS; i++) {
         put_str(b, x->args[i].expr);
         put_str(b, x->args[i].value);
+        put_str(b, x->args[i].url_value);
         put_str(b, x->args[i].keyword);
     }
 }
@@ -303,6 +305,7 @@ static void dec_call(spill_rd_t *r, CBMCall *x) {
     for (int i = 0; i < CBM_MAX_CALL_ARGS; i++) {
         x->args[i].expr = take_str(r);
         x->args[i].value = take_str(r);
+        x->args[i].url_value = take_str(r);
         x->args[i].keyword = take_str(r);
     }
 }
@@ -313,7 +316,7 @@ static void dec_call(spill_rd_t *r, CBMCall *x) {
     static void enc_##sfx(spill_buf_t *b, const T *x) { FIELDS(ENC_STR) }          \
     static void dec_##sfx(spill_rd_t *r, T *x) { FIELDS(DEC_STR) }
 
-#define IMPORT_STRS(X) X(local_name) X(module_path)
+#define IMPORT_STRS(X) X(local_name) X(module_path) X(member)
 #define USAGE_STRS(X) X(ref_name) X(enclosing_func_qn)
 #define THROW_STRS(X) X(exception_name) X(enclosing_func_qn)
 #define RW_STRS(X) X(var_name) X(enclosing_func_qn)

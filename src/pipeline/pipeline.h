@@ -395,6 +395,12 @@ bool cbm_suppress_zig_qualified_member(bool is_zig, bool is_method, const char *
 bool cbm_suppress_weak_local_binding_call(bool enabled, bool callee_is_locally_bound,
                                           const char *strategy);
 
+/* True for the weak short-name strategies the two guards above drop
+ * (suffix_match / unique_name / field_type_hint / fuzzy): a match by name
+ * alone, with no import, receiver or module evidence. Pure; unit-tested in
+ * test_registry.c. */
+bool cbm_registry_strategy_is_weak(const char *strategy);
+
 /* Decide whether to drop a suffix_match CALLS edge when the caller language
  * and the target file's language disagree (upstream 416ba994/#725): two
  * same-named symbols in different languages would otherwise collapse onto one

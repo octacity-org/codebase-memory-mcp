@@ -468,6 +468,10 @@ static bool weak_short_name_strategy(const char *strategy) {
            strcmp(strategy, "field_type_hint") == 0 || strcmp(strategy, "fuzzy") == 0;
 }
 
+bool cbm_registry_strategy_is_weak(const char *strategy) {
+    return weak_short_name_strategy(strategy);
+}
+
 bool cbm_suppress_weak_member_match(bool enabled, bool is_method, const char *strategy) {
     if (!enabled || !is_method) {
         return false;
