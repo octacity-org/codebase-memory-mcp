@@ -832,6 +832,20 @@ TEST(dynamic_suppress_drops_weak_method_matches) {
     PASS();
 }
 
+TEST(registry_strategy_is_weak_matches_the_guard_drop_list) {
+    /* The external-import binding outranks exactly these name-only matches. */
+    ASSERT_TRUE(cbm_registry_strategy_is_weak("suffix_match"));
+    ASSERT_TRUE(cbm_registry_strategy_is_weak("unique_name"));
+    ASSERT_TRUE(cbm_registry_strategy_is_weak("field_type_hint"));
+    ASSERT_TRUE(cbm_registry_strategy_is_weak("fuzzy"));
+    ASSERT_FALSE(cbm_registry_strategy_is_weak("import_map"));
+    ASSERT_FALSE(cbm_registry_strategy_is_weak("same_module"));
+    ASSERT_FALSE(cbm_registry_strategy_is_weak("lsp_ts_method"));
+    ASSERT_FALSE(cbm_registry_strategy_is_weak(""));
+    ASSERT_FALSE(cbm_registry_strategy_is_weak(NULL));
+    PASS();
+}
+
 TEST(zig_suppress_drops_qualified_suffix_member_matches) {
     /* Zig only, member calls only, qualified_suffix only. */
     ASSERT_TRUE(cbm_suppress_zig_qualified_member(true, true, "qualified_suffix"));
@@ -1024,6 +1038,7 @@ SUITE(registry) {
     RUN_TEST(cross_language_ref_drops_go_vs_c);
     RUN_TEST(go_bare_ref_never_binds_field);
     RUN_TEST(dynamic_suppress_drops_weak_method_matches);
+    RUN_TEST(registry_strategy_is_weak_matches_the_guard_drop_list);
     RUN_TEST(zig_suppress_drops_qualified_suffix_member_matches);
     RUN_TEST(dynamic_suppress_keeps_high_confidence_and_non_methods);
     RUN_TEST(local_binding_suppress_drops_weak_shadowed_bare_calls);

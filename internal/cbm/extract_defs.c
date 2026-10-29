@@ -1285,7 +1285,8 @@ static const char *decorator_method_name(const char *attr_text) {
     if (strcmp(method, "patch") == 0 || strcmp(method, "Patch") == 0) {
         return "PATCH";
     }
-    if (strcmp(method, "route") == 0 || strcmp(method, "api_route") == 0) {
+    if (strcmp(method, "route") == 0 || strcmp(method, "api_route") == 0 ||
+        strcmp(method, "websocket") == 0 || strcmp(method, "websocket_route") == 0) {
         return "ANY";
     }
     return NULL;
@@ -1539,7 +1540,11 @@ static bool try_drf_action_decorator(CBMArena *a, TSNode dchild, const char *sou
 }
 
 // Try to extract a route from a single decorator call node.
-// Returns true if a route method was found (even with fallback path "/").
+// Returns true if a route method was found. The fallback path "/" applies only
+// to a zero-argument call (`@app.route()`): a call that HAS arguments but none
+// path-shaped is not a route -- unittest.mock's `@patch("subprocess.run")`
+// shares its name with the HTTP verb and used to mint a PATCH "/" handler for
+// every mocked test function.
 static bool try_route_from_decorator_call(CBMArena *a, TSNode dchild, const char *source,
                                           const char **out_path, const char **out_method) {
     TSNode fn = ts_node_child_by_field_name(dchild, TS_FIELD("function"));
@@ -1563,6 +1568,11 @@ static bool try_route_from_decorator_call(CBMArena *a, TSNode dchild, const char
             *out_path = path;
             *out_method = method;
             return true;
+        }
+        /* If decorator has arguments but none resolved to a '/'-prefixed path,
+         * intentionally produce no Route to prevent false root routes (e.g. @mock.patch). */
+        if (ts_node_named_child_count(args) > 0) {
+            return false;
         }
     }
     *out_path = "/";

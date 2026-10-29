@@ -1447,13 +1447,15 @@ static int node_public_order_compare(const void *left_ptr, const void *right_ptr
 
 int cbm_store_find_nodes_by_name(cbm_store_t *s, const char *project, const char *name,
                                  cbm_node_t **out, int *count) {
-    if (s && s->zova_workspace_query && s->zova_repository) {
+    if (s && (s->backend || (s->zova_workspace_query && s->zova_repository))) {
         cbm_search_output_t search = {0};
         cbm_search_params_t params = {
             .project = project, .name_pattern = name, .min_degree = -1, .max_degree = -1,
             .limit = INT_MAX};
-        int rc = cbm_zova_repository_search(
-            s->zova_repository, s->zova_graph_workspace_id, &params, &search);
+        int rc = s->backend
+                     ? s->backend->search(s->backend_ctx, &params, &search)
+                     : cbm_zova_repository_search(
+                           s->zova_repository, s->zova_graph_workspace_id, &params, &search);
         if (rc != CBM_STORE_OK) {
             *out = NULL;
             *count = 0;

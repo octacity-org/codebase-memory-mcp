@@ -871,6 +871,60 @@ static int count_nodes_named(cbm_store_t *s, const char *project, const char *na
     return n;
 }
 
+/* HTTP_CALLS edges out of the function `source_name` whose Route target's
+ * qualified name contains `route_qn_part` (e.g. "__route__GET__"). */
+static int http_calls_to_route(cbm_store_t *s, const char *project, const char *source_name,
+                               const char *route_qn_part) {
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    if (cbm_store_find_edges_by_type(s, project, "HTTP_CALLS", &edges, &edge_count) !=
+        CBM_STORE_OK) {
+        return -1;
+    }
+    int matches = 0;
+    for (int i = 0; i < edge_count; i++) {
+        cbm_node_t source = {0};
+        cbm_node_t target = {0};
+        int source_ok = cbm_store_find_node_by_id(s, edges[i].source_id, &source) == CBM_STORE_OK;
+        int target_ok = cbm_store_find_node_by_id(s, edges[i].target_id, &target) == CBM_STORE_OK;
+        if (source_ok && target_ok && source.name && target.qualified_name &&
+            strcmp(source.name, source_name) == 0 && strstr(target.qualified_name, route_qn_part)) {
+            matches++;
+        }
+        cbm_node_free_fields(&source);
+        cbm_node_free_fields(&target);
+    }
+    if (edges) {
+        cbm_store_free_edges(edges, edge_count);
+    }
+    return matches;
+}
+
+/* Route-registration CALLS edges (via=route_registration) out of the function
+ * `source_name`. */
+static int route_registrations_from(cbm_store_t *s, const char *project, const char *source_name) {
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    if (cbm_store_find_edges_by_type(s, project, "CALLS", &edges, &edge_count) != CBM_STORE_OK) {
+        return -1;
+    }
+    int matches = 0;
+    for (int i = 0; i < edge_count; i++) {
+        cbm_node_t source = {0};
+        int source_ok = cbm_store_find_node_by_id(s, edges[i].source_id, &source) == CBM_STORE_OK;
+        if (source_ok && source.name && strcmp(source.name, source_name) == 0 &&
+            edges[i].properties_json &&
+            strstr(edges[i].properties_json, "\"via\":\"route_registration\"")) {
+            matches++;
+        }
+        cbm_node_free_fields(&source);
+    }
+    if (edges) {
+        cbm_store_free_edges(edges, edge_count);
+    }
+    return matches;
+}
+
 /* Parallel-resolver regression for the TS/JS receiver guard (>= 50 files forces
  * pass_parallel.c's resolve_file_calls). The guard must not drop a weak member
  * match before the service classification runs — it suppresses ONLY the plain
@@ -971,16 +1025,19 @@ TEST(pipeline_tsjs_receiver_parallel_keeps_service_edges) {
     cbm_store_t *s = th_open_repo_store(tmp);
     ASSERT_NOT_NULL(s);
 
-    /* (1) Genuine HTTP_CALLS survive under the guard (>= 3):
-     *   - axios.get('/api/orders') -> 2 edges (recognized lib #523 callee bypass
-     *     + detect_url_in_args), and
+    /* (1) Genuine HTTP_CALLS survive under the guard:
+     *   - axios.get('/api/orders') -> 1 edge, typed GET (recognized lib #523
+     *     callee bypass; no method-less arg-URL twin), and
      *   - dev.load('/api/data')    -> 1 edge via detect_url_in_args, which runs
-     *     unconditionally after emit_service_edge's branch even when the plain
-     *     fall-through is suppressed.
+     *     after emit_service_edge's branch even when the plain fall-through is
+     *     suppressed.
      * dev.load is the class the predicate-duplicating guard lost: `.load` is not
      * a route suffix and `dev` is not an HTTP lib, so it was dropped before
-     * emit_service_edge ran (RED on that guard: only axios's 2). */
-    ASSERT_GTE(cbm_store_count_edges_by_type(s, project, "HTTP_CALLS"), 3);
+     * emit_service_edge ran (RED on that guard: only axios's edge). */
+    ASSERT_EQ(http_calls_to_route(s, project, "callApi", "__route__GET__"), 1);
+    ASSERT_EQ(http_calls_to_route(s, project, "callApi", "__route__"), 1);
+    ASSERT_EQ(http_calls_to_route(s, project, "callLoad", "__route__ANY__"), 1);
+    ASSERT_EQ(cbm_store_count_edges_by_type(s, project, "HTTP_CALLS"), 2);
     /* (2) The verb-suffix + route-path member calls keep their route
      * registrations (edge type CALLS -> a Route node named by the path). These
      * classify as route_registration on main, NOT HTTP_CALLS — Option A preserves
@@ -2037,6 +2094,240 @@ TEST(pipeline_python_receiver_parallel_suppresses_weak_method_edges) {
     ASSERT_FALSE(step_edge);
     ASSERT_TRUE(compute_edge);
     ASSERT_TRUE(local_edge);
+    PASS();
+}
+
+/* `edge_type` edges out of the function `source_name` whose target QN contains
+ * `target_needle` (any target when NULL); -1 on a failed query. */
+static int xi_edges_from(cbm_store_t *s, const char *project, const char *edge_type,
+                         const char *source_name, const char *target_needle) {
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    if (cbm_store_find_edges_by_type(s, project, edge_type, &edges, &edge_count) !=
+        CBM_STORE_OK) {
+        return -1;
+    }
+    int matches = 0;
+    for (int i = 0; i < edge_count; i++) {
+        cbm_node_t source = {0};
+        cbm_node_t target = {0};
+        bool source_ok = cbm_store_find_node_by_id(s, edges[i].source_id, &source) ==
+                             CBM_STORE_OK &&
+                         source.name && strcmp(source.name, source_name) == 0;
+        bool target_ok = !target_needle ||
+                         (cbm_store_find_node_by_id(s, edges[i].target_id, &target) ==
+                              CBM_STORE_OK &&
+                          target.qualified_name && strstr(target.qualified_name, target_needle));
+        if (source_ok && target_ok) {
+            matches++;
+        }
+        cbm_node_free_fields(&source);
+        cbm_node_free_fields(&target);
+    }
+    if (edges) {
+        cbm_store_free_edges(edges, edge_count);
+    }
+    return matches;
+}
+
+/* HTTP_CALLS + ASYNC_CALLS edges out of the function `source_name`. */
+static int xi_service_edges_from(cbm_store_t *s, const char *project, const char *source_name) {
+    int http = xi_edges_from(s, project, "HTTP_CALLS", source_name, NULL);
+    int async = xi_edges_from(s, project, "ASYNC_CALLS", source_name, NULL);
+    return http < 0 || async < 0 ? -1 : http + async;
+}
+
+/* IMPORTS edges whose local_name is `local_name`; -1 on a failed query. */
+static int xi_imports_binding(cbm_store_t *s, const char *project, const char *local_name) {
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    if (cbm_store_find_edges_by_type(s, project, "IMPORTS", &edges, &edge_count) !=
+        CBM_STORE_OK) {
+        return -1;
+    }
+    char needle[128];
+    snprintf(needle, sizeof(needle), "\"local_name\":\"%s\"", local_name);
+    int matches = 0;
+    for (int i = 0; i < edge_count; i++) {
+        if (edges[i].properties_json && strstr(edges[i].properties_json, needle)) {
+            matches++;
+        }
+    }
+    if (edges) {
+        cbm_store_free_edges(edges, edge_count);
+    }
+    return matches;
+}
+
+/* A call through an import of an EXTERNAL client library is that library's
+ * call: `fetchIt` from `{ get as fetchIt } from 'axios'` is a typed GET,
+ * `http_post` from `from requests import post as http_post` a typed POST,
+ * `emitIt` from `{ publish as emitIt } from 'mqtt'` a publish -- also when a
+ * same-named project function elsewhere would win a weak name match
+ * (`navigate` under `{ get as navigate }`, with a Python `navigate`). A bare
+ * native `fetch('/api/items')` is a GET (upstream #856). Precision controls,
+ * each with no HTTP_CALLS/ASYNC_CALLS edge:
+ *   - urljoin from urllib.parse: an HTTP library's helper, not a request;
+ *   - lodash's `get`, json's `dumps`: libraries no service pattern knows;
+ *   - `send` defined in the importing module shadows
+ *     `from paho.mqtt import publish as send`; `relay` rebound as a parameter
+ *     shadows `... as relay`;
+ *   - `httpx` is a PROJECT package here: its import is materialized (the
+ *     precondition is asserted), so the call stays off the external httpx.post.
+ * Both resolvers: CBM_WORKERS=1 is sequential, 4 with > 50 files parallel. */
+TEST(pipeline_external_import_binding_sequential_parallel) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s/cbm_extimport_XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(
+        tmp, "src/ext_http.ts",
+        "import { get as fetchIt } from 'axios';\n"
+        "import { get as navigate } from 'axios';\n"
+        "import { get as lodashGet } from 'lodash';\n"
+        "import { publish as emitIt } from 'mqtt';\n"
+        "export function viaAxiosAlias(): unknown { return fetchIt('/api/alias-get'); }\n"
+        "export function viaShadowedName(): unknown { return navigate('/api/alias-nav'); }\n"
+        "export function viaLodashAlias(o: object): unknown {\n"
+        "  return lodashGet(o, '/api/lodash');\n"
+        "}\n"
+        "export function viaMqtt(): void { emitIt('tenant/ts', 'payload'); }\n"
+        "export function viaFetch(): unknown { return fetch('/api/items'); }\n");
+    write_temp_file(tmp, "src/nav.py", "def navigate(url):\n    return url\n");
+    write_temp_file(tmp, "src/ext_py.py",
+                    "from requests import post as http_post\n"
+                    "from urllib.parse import urljoin\n"
+                    "from json import dumps as publish_json\n"
+                    "from paho.mqtt import publish as send\n"
+                    "def py_post():\n    return http_post('/api/py-post')\n"
+                    "def join_url(base):\n    return urljoin(base, '/static/asset.css')\n"
+                    "def join_abs(name):\n    return urljoin('https://example.com/assets/', name)\n"
+                    "def to_json():\n    return publish_json('/tenant/json')\n"
+                    "def send(topic, payload):\n    return topic\n"
+                    "def shadowed():\n    return send('tenant/shadow', 'payload')\n");
+    write_temp_file(tmp, "src/ext_param.py",
+                    "from paho.mqtt import publish as relay\n"
+                    "def param_shadow(relay):\n    return relay('tenant/param', 'payload')\n");
+    write_temp_file(tmp, "httpx/__init__.py", "def get(url):\n    return url\n");
+    write_temp_file(tmp, "src/proj_client.py",
+                    "from httpx import post as hx_post\n"
+                    "def proj_post():\n    return hx_post('/api/project')\n");
+    for (int i = 0; i < 52; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "src/padding%d.ts", i);
+        snprintf(body, sizeof(body), "export function padding%d() { return %d; }\n", i, i);
+        write_temp_file(tmp, name, body);
+    }
+    static const char *const silent[] = {"viaLodashAlias", "join_url",     "join_abs", "to_json",
+                                         "shadowed",       "param_shadow", "proj_post"};
+    enum { SILENT = sizeof(silent) / sizeof(silent[0]) };
+    static const char *const workers[2] = {"1", "4"};
+    char *old_workers = getenv("CBM_WORKERS");
+    char *saved_workers = old_workers ? strdup(old_workers) : NULL;
+    int run_rc[2] = {-1, -1};
+    bool opened[2] = {false, false};
+    int typed_get[2] = {-1, -1};
+    int shadowed_get[2] = {-1, -1};
+    int fetch_get[2] = {-1, -1};
+    int typed_post[2] = {-1, -1};
+    int published[2] = {-1, -1};
+    int shadow_calls[2] = {-1, -1};
+    int project_import[2] = {-1, -1};
+    int silent_edges[2][SILENT];
+    for (int mode = 0; mode < 2; mode++) {
+        for (int i = 0; i < SILENT; i++) {
+            silent_edges[mode][i] = -1;
+        }
+        char *proj_name = cbm_project_name_from_path(tmp);
+        if (proj_name) {
+            th_remove_project_workspace(proj_name);
+            free(proj_name);
+        }
+        cbm_setenv("CBM_WORKERS", workers[mode], 1);
+        cbm_pipeline_t *p = cbm_pipeline_new(tmp, NULL, CBM_MODE_FULL);
+        run_rc[mode] = p ? cbm_pipeline_run(p) : -1;
+        const char *project = p ? cbm_pipeline_project_name(p) : NULL;
+        cbm_store_t *s = run_rc[mode] == 0 ? th_open_repo_store(tmp) : NULL;
+        opened[mode] = s != NULL;
+        if (s && project) {
+            typed_get[mode] = xi_edges_from(s, project, "HTTP_CALLS", "viaAxiosAlias",
+                                            "__route__GET__/api/alias-get");
+            shadowed_get[mode] = xi_edges_from(s, project, "HTTP_CALLS", "viaShadowedName",
+                                               "__route__GET__/api/alias-nav");
+            fetch_get[mode] =
+                xi_edges_from(s, project, "HTTP_CALLS", "viaFetch", "/api/items");
+            typed_post[mode] = xi_edges_from(s, project, "HTTP_CALLS", "py_post",
+                                             "__route__POST__/api/py-post");
+            published[mode] = xi_edges_from(s, project, "ASYNC_CALLS", "viaMqtt", "tenant/ts");
+            shadow_calls[mode] = xi_edges_from(s, project, "CALLS", "shadowed", "send");
+            project_import[mode] = xi_imports_binding(s, project, "hx_post");
+            for (int i = 0; i < SILENT; i++) {
+                silent_edges[mode][i] = xi_service_edges_from(s, project, silent[i]);
+            }
+        }
+        if (s) {
+            cbm_store_close(s);
+        }
+        cbm_pipeline_free(p);
+    }
+    if (saved_workers) {
+        cbm_setenv("CBM_WORKERS", saved_workers, 1);
+        free(saved_workers);
+    } else {
+        cbm_unsetenv("CBM_WORKERS");
+    }
+    th_rmtree(tmp);
+    for (int mode = 0; mode < 2; mode++) {
+        ASSERT_EQ(run_rc[mode], 0);
+        ASSERT_TRUE(opened[mode]);
+        ASSERT_EQ(typed_get[mode], 1);
+        ASSERT_EQ(shadowed_get[mode], 1);
+        ASSERT_EQ(fetch_get[mode], 1);
+        ASSERT_EQ(typed_post[mode], 1);
+        ASSERT_EQ(published[mode], 1);
+        ASSERT_GTE(shadow_calls[mode], 1);
+        ASSERT_GTE(project_import[mode], 1);
+        for (int i = 0; i < SILENT; i++) {
+            ASSERT_EQ(silent_edges[mode][i], 0);
+        }
+    }
+    PASS();
+}
+
+/* Native `fetch()` (upstream #856): a LOCAL `fetch` definition wins over the
+ * global-API guess. Registry resolution finds this project's own top-level
+ * `fetch`, so the call is a plain CALLS edge to it, never HTTP_CALLS. Its own
+ * project: the registry's project-wide unique-name fallback lets a local
+ * `fetch` anywhere capture bare `fetch()` calls project-wide. */
+TEST(pipeline_local_fetch_shadow_not_classified_as_http) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s/cbm_fetch_shadow_XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+    write_temp_file(tmp, "src/local_fetch.ts",
+                    "function fetch(url: string): string {\n"
+                    "  return 'mock:' + url;\n"
+                    "}\n"
+                    "export function useLocalFetch(): string {\n"
+                    "  return fetch('/api/data');\n"
+                    "}\n");
+
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, NULL, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+
+    cbm_store_t *s = th_open_repo_store(tmp);
+    ASSERT_NOT_NULL(s);
+    ASSERT_EQ(cbm_store_count_edges_by_type(s, project, "HTTP_CALLS"), 0);
+    ASSERT_TRUE(cross_file_call_exists(s, project, "useLocalFetch", "fetch"));
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
     PASS();
 }
 
@@ -7680,6 +7971,611 @@ TEST(pipeline_arg_url_rejects_non_http_slash_arguments) {
     PASS();
 }
 
+/* Count HTTP_CALLS-style edges whose url_path property contains `keyword`. */
+static int count_edges_with_url_path(cbm_store_t *s, const char *project, const char *keyword) {
+    cbm_edge_t *es = NULL;
+    int n = 0;
+    int matches = 0;
+    if (cbm_store_find_edges_by_type(s, project, "HTTP_CALLS", &es, &n) == CBM_STORE_OK && es) {
+        for (int i = 0; i < n; i++) {
+            if (es[i].properties_json && strstr(es[i].properties_json, keyword)) {
+                matches++;
+            }
+        }
+    }
+    if (es) {
+        cbm_store_free_edges(es, n);
+    }
+    return matches;
+}
+
+/* Distilled from PR #1245: detect_url_in_args (parallel resolver, >= 50 files)
+ * runs for EVERY resolved call with no callee gating, so a filesystem path
+ * with a document/log extension passed to a project-defined open/read/write
+ * helper passed normalize_url_arg (second slash, no space) and the route
+ * literal guard, minting a Route node + an HTTP_CALLS edge for a file. The
+ * callees are project functions on purpose: a bare builtin `open(...)` never
+ * resolves to a target and so never reaches emit_service_edge at all. The
+ * first path segments avoid the filesystem-root list (etc/var/tmp/...) so
+ * only the extension guard can reject them. requests.get('/api/items') is
+ * the positive control that must keep its Route + HTTP_CALLS. */
+TEST(pipeline_arg_url_rejects_document_file_paths) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s/cbm_arg_url_docs_XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+
+    write_temp_file(tmp, "src/files.py",
+                    "import requests\n"
+                    "def open_file(path):\n"
+                    "    return path\n"
+                    "def read_file(path):\n"
+                    "    return path\n"
+                    "def write_file(path):\n"
+                    "    return path\n"
+                    "def load_docs():\n"
+                    "    open_file('/new/file.txt')\n"
+                    "    read_file('/docs/guide.md')\n"
+                    "    write_file('/data/app.log')\n"
+                    "    read_file('/reports/summary.pdf')\n"
+                    "    open_file('/docs/index.rst')\n"
+                    "def fetch_items():\n"
+                    "    return requests.get('/api/items')\n");
+    for (int i = 0; i < 52; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "src/filler%d.ts", i);
+        snprintf(body, sizeof(body), "export function filler%d(): number { return %d; }\n", i, i);
+        write_temp_file(tmp, name, body);
+    }
+
+    char *old_workers = getenv("CBM_WORKERS");
+    char *saved = old_workers ? strdup(old_workers) : NULL;
+    cbm_setenv("CBM_WORKERS", "4", 1);
+
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, NULL, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+
+    cbm_store_t *s = th_open_repo_store(tmp);
+    ASSERT_NOT_NULL(s);
+
+    /* Positive control first: the genuine HTTP call still mints its route. */
+    ASSERT_GTE(count_nodes_named(s, project, "/api/items"), 1);
+    ASSERT_GTE(count_edges_with_url_path(s, project, "/api/items"), 1);
+    /* No Route node for any filesystem document path... */
+    ASSERT_EQ(count_nodes_named(s, project, "/new/file.txt"), 0);
+    ASSERT_EQ(count_nodes_named(s, project, "/docs/guide.md"), 0);
+    ASSERT_EQ(count_nodes_named(s, project, "/data/app.log"), 0);
+    ASSERT_EQ(count_nodes_named(s, project, "/reports/summary.pdf"), 0);
+    ASSERT_EQ(count_nodes_named(s, project, "/docs/index.rst"), 0);
+    /* ...and no HTTP_CALLS edge carrying one as its url_path either. */
+    ASSERT_EQ(count_edges_with_url_path(s, project, "/new/file.txt"), 0);
+    ASSERT_EQ(count_edges_with_url_path(s, project, "/docs/guide.md"), 0);
+    ASSERT_EQ(count_edges_with_url_path(s, project, "/data/app.log"), 0);
+    ASSERT_EQ(count_edges_with_url_path(s, project, "/reports/summary.pdf"), 0);
+    ASSERT_EQ(count_edges_with_url_path(s, project, "/docs/index.rst"), 0);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    if (saved) {
+        cbm_setenv("CBM_WORKERS", saved, 1);
+        free(saved);
+    } else {
+        cbm_unsetenv("CBM_WORKERS");
+    }
+    th_rmtree(tmp);
+    PASS();
+}
+
+/* Count nodes with the given label in the project. */
+static int nav_count_nodes_by_label(cbm_store_t *s, const char *project, const char *label) {
+    cbm_node_t *nodes = NULL;
+    int count = 0;
+    if (cbm_store_find_nodes_by_label(s, project, label, &nodes, &count) != CBM_STORE_OK) {
+        return -1;
+    }
+    if (nodes) {
+        cbm_store_free_nodes(nodes, count);
+    }
+    return count;
+}
+
+/* Count Route nodes with the given name in the project. */
+static int nav_count_routes_named(cbm_store_t *s, const char *project, const char *name) {
+    cbm_node_t *nodes = NULL;
+    int count = 0;
+    if (cbm_store_find_nodes_by_label(s, project, "Route", &nodes, &count) != CBM_STORE_OK) {
+        return -1;
+    }
+    int matches = 0;
+    for (int i = 0; i < count; i++) {
+        if (nodes[i].name && strcmp(nodes[i].name, name) == 0) {
+            matches++;
+        }
+    }
+    if (nodes) {
+        cbm_store_free_nodes(nodes, count);
+    }
+    return matches;
+}
+
+/* Count nodes with the given name and file_path substring in the project. */
+static int nav_count_source_nodes(cbm_store_t *s, const char *project, const char *name,
+                                  const char *file_path) {
+    cbm_node_t *nodes = NULL;
+    int count = 0;
+    if (cbm_store_find_nodes_by_name(s, project, name, &nodes, &count) != CBM_STORE_OK) {
+        return -1;
+    }
+    int matches = 0;
+    for (int i = 0; i < count; i++) {
+        if (nodes[i].file_path && strstr(nodes[i].file_path, file_path) != NULL) {
+            matches++;
+        }
+    }
+    if (nodes) {
+        cbm_store_free_nodes(nodes, count);
+    }
+    return matches;
+}
+
+/* Count HTTP_CALLS edges out of source_name with matching url_path property. */
+static int nav_count_http_calls_with_url(cbm_store_t *s, const char *project,
+                                         const char *source_name, const char *url_path) {
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    if (cbm_store_find_edges_by_type(s, project, "HTTP_CALLS", &edges, &edge_count) != CBM_STORE_OK) {
+        return -1;
+    }
+    int matches = 0;
+    for (int i = 0; i < edge_count; i++) {
+        cbm_node_t source = {0};
+        int source_ok = cbm_store_find_node_by_id(s, edges[i].source_id, &source) == CBM_STORE_OK;
+        if (source_ok && source.name && strcmp(source.name, source_name) == 0) {
+            const char *props = edges[i].properties_json ? edges[i].properties_json : "";
+            char needle[256];
+            snprintf(needle, sizeof(needle), "\"url_path\":\"%s\"", url_path);
+            if (strstr(props, needle) != NULL) {
+                matches++;
+            }
+        }
+        cbm_node_free_fields(&source);
+    }
+    if (edges) {
+        cbm_store_free_edges(edges, edge_count);
+    }
+    return matches;
+}
+
+/* Count edges of edge_type between exact source and target node names. */
+static int nav_count_named_edges(cbm_store_t *s, const char *project, const char *edge_type,
+                                 const char *source_name, const char *target_name) {
+    cbm_edge_t *edges = NULL;
+    int edge_count = 0;
+    if (cbm_store_find_edges_by_type(s, project, edge_type, &edges, &edge_count) != CBM_STORE_OK) {
+        return -1;
+    }
+    int matches = 0;
+    for (int i = 0; i < edge_count; i++) {
+        cbm_node_t source = {0};
+        cbm_node_t target = {0};
+        int source_ok = cbm_store_find_node_by_id(s, edges[i].source_id, &source) == CBM_STORE_OK;
+        int target_ok = cbm_store_find_node_by_id(s, edges[i].target_id, &target) == CBM_STORE_OK;
+        if (source_ok && target_ok && source.name && target.name &&
+            strcmp(source.name, source_name) == 0 && strcmp(target.name, target_name) == 0) {
+            matches++;
+        }
+        cbm_node_free_fields(&source);
+        cbm_node_free_fields(&target);
+    }
+    if (edges) {
+        cbm_store_free_edges(edges, edge_count);
+    }
+    return matches;
+}
+
+/* #1250: exercise the generic URL heuristic with real extracted occurrences
+ * and real source nodes. More than 50 files selects the parallel resolver.
+ * HTTP clients, custom navigateApi wrappers, Python and ASYNC keep their edges. */
+TEST(pipeline_arg_url_skips_client_navigation) {
+    static const char page[] =
+        "import axios from 'axios';\n"
+        "import { get as navigate } from 'axios';\n"
+        "import { navigateTo, http, navigateApi } from './nav';\n"
+        "export class PaymentsPage {\n"
+        "  constructor(private router: any, private navCtrl: any, private location: any,\n"
+        "              private $router: any, private history: any) {}\n"
+        "  goPayments(): void { this.router.navigateByUrl('/payments/list'); }\n"
+        "  goBenefits(): void { this.navCtrl.navigateForward('/benefits/detail'); }\n"
+        "  goBack(): void { this.location.go('/orders/back'); }\n"
+        "  goVue(): void { this.$router.push('/dashboard/settings'); }\n"
+        "  goHist(): void { this.history.pushState(null, '', '/account/history'); }\n"
+        "  goWidget(id: string): void { navigateTo(`/widgetTypes/view/${id}`); }\n"
+        "  load(): unknown { return http('/api/customers'); }\n"
+        "  orders(): unknown { return axios.get('/api/orders'); }\n"
+        "  items(): unknown { return fetch('/api/items'); }\n"
+        "  custom(): unknown { return navigateApi('/api/navigation'); }\n"
+        "  explicitAlias(): unknown { return navigate('/api/alias'); }\n"
+        "  publish(): void { mqtt.publish('/tenant/events', 'payload'); }\n"
+        "}\n";
+    static const struct {
+        const char *callee;
+        const char *source;
+        const char *path;
+    } navigation[] = {
+        {"this.router.navigateByUrl", "goPayments", "/payments/list"},
+        {"this.navCtrl.navigateForward", "goBenefits", "/benefits/detail"},
+        {"this.location.go", "goBack", "/orders/back"},
+        {"this.$router.push", "goVue", "/dashboard/settings"},
+        {"this.history.pushState", "goHist", "/account/history"},
+        {"navigateTo", "goWidget", "/widgetTypes/view/{}"},
+    };
+    static const struct {
+        const char *source;
+        const char *path;
+    } positive[] = {{"load", "/api/customers"},
+                    {"orders", "/api/orders"},
+                    {"items", "/api/items"},
+                    {"custom", "/api/navigation"},
+                    {"load_items", "/api/python/items"},
+                    {"explicitAlias", "/api/alias"}};
+
+    int extracted[6] = {0};
+    CBMFileResult *fr = cbm_extract_file(page, (int)strlen(page), CBM_LANG_TYPESCRIPT,
+                                         "navigation_probe", "src/page.ts", 0, NULL, NULL);
+    bool extraction_ok = fr && !fr->has_error;
+    if (extraction_ok) {
+        for (int c = 0; c < fr->calls.count; c++) {
+            const CBMCall *call = &fr->calls.items[c];
+            for (size_t i = 0; i < sizeof(navigation) / sizeof(navigation[0]); i++) {
+                if (call->callee_name && strcmp(call->callee_name, navigation[i].callee) == 0) {
+                    extracted[i]++;
+                }
+            }
+        }
+        cbm_free_result(fr);
+    }
+
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s/cbm_arg_url_nav_XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+
+    char *saved_workers = getenv("CBM_WORKERS") ? strdup(getenv("CBM_WORKERS")) : NULL;
+    char *saved_single =
+        getenv("CBM_INDEX_SINGLE_THREAD") ? strdup(getenv("CBM_INDEX_SINGLE_THREAD")) : NULL;
+
+    write_temp_file(tmp, "src/page.ts", page);
+    write_temp_file(tmp, "src/nav.ts",
+                    "export function navigateTo(url: string): void {}\n"
+                    "export function http(url: string): Promise<unknown> { return fetch(url); }\n"
+                    "export function navigateApi(url: string): Promise<unknown> {\n"
+                    "  return fetch(url);\n"
+                    "}\n");
+    write_temp_file(tmp, "src/py.py",
+                    "def navigate(url):\n    return url\n"
+                    "def load_items():\n    return navigate('/api/python/items')\n");
+    for (int i = 0; i < 52; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "src/filler%d.ts", i);
+        snprintf(body, sizeof(body), "export function filler%d(): number { return %d; }\n", i, i);
+        write_temp_file(tmp, name, body);
+    }
+    cbm_setenv("CBM_WORKERS", "4", 1);
+    cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+    const char *workers = getenv("CBM_WORKERS");
+    bool configured =
+        workers && strcmp(workers, "4") == 0 && getenv("CBM_INDEX_SINGLE_THREAD") == NULL;
+    cbm_pipeline_t *p = configured ? cbm_pipeline_new(tmp, NULL, CBM_MODE_FULL) : NULL;
+    int run_rc = p ? cbm_pipeline_run(p) : -1;
+    cbm_store_t *store = run_rc == 0 ? th_open_repo_store(tmp) : NULL;
+    bool observed = store != NULL;
+    int nav_edges[6], nav_routes[6], sources[6], good_edges[6];
+    int files = -1, async_edges = -1, async_http = -1;
+    for (size_t i = 0; i < 6; i++) {
+        nav_edges[i] = nav_routes[i] = sources[i] = -1;
+    }
+    for (size_t i = 0; i < 6; i++) {
+        good_edges[i] = -1;
+    }
+    if (store) {
+        const char *project = cbm_pipeline_project_name(p);
+        files = nav_count_nodes_by_label(store, project, "File");
+        for (size_t i = 0; i < 6; i++) {
+            nav_edges[i] = nav_count_http_calls_with_url(store, project, navigation[i].source,
+                                                         navigation[i].path);
+            nav_routes[i] = nav_count_routes_named(store, project, navigation[i].path);
+            sources[i] = nav_count_source_nodes(store, project, navigation[i].source,
+                                                "src/page.ts");
+        }
+        for (size_t i = 0; i < 6; i++) {
+            good_edges[i] = nav_count_http_calls_with_url(store, project, positive[i].source,
+                                                          positive[i].path);
+        }
+        async_edges = nav_count_named_edges(store, project, "ASYNC_CALLS", "publish",
+                                            "/tenant/events");
+        async_http = nav_count_http_calls_with_url(store, project, "publish", "/tenant/events");
+        cbm_store_close(store);
+    }
+    cbm_pipeline_free(p);
+    if (saved_workers) {
+        cbm_setenv("CBM_WORKERS", saved_workers, 1);
+    } else {
+        cbm_unsetenv("CBM_WORKERS");
+    }
+    if (saved_single) {
+        cbm_setenv("CBM_INDEX_SINGLE_THREAD", saved_single, 1);
+    } else {
+        cbm_unsetenv("CBM_INDEX_SINGLE_THREAD");
+    }
+    const char *restored_workers = getenv("CBM_WORKERS");
+    const char *restored_single = getenv("CBM_INDEX_SINGLE_THREAD");
+    bool restored =
+        (saved_workers ? restored_workers && strcmp(saved_workers, restored_workers) == 0
+                       : !restored_workers) &&
+        (saved_single ? restored_single && strcmp(saved_single, restored_single) == 0
+                      : !restored_single);
+    free(saved_workers);
+    free(saved_single);
+    th_rmtree(tmp);
+
+    ASSERT_TRUE(extraction_ok);
+    ASSERT_TRUE(configured);
+    ASSERT_TRUE(restored);
+    ASSERT_EQ(run_rc, 0);
+    ASSERT_TRUE(observed);
+    ASSERT_GTE(files, 55);
+    for (size_t i = 0; i < 6; i++) {
+        ASSERT_EQ(extracted[i], 1);
+        ASSERT_EQ(sources[i], 1);
+        ASSERT_EQ(nav_edges[i], 0);
+        ASSERT_EQ(nav_routes[i], 0);
+    }
+    for (size_t i = 0; i < 6; i++) {
+        ASSERT_GTE(good_edges[i], 1);
+    }
+    ASSERT_GTE(async_edges, 1);
+    ASSERT_EQ(async_http, 0);
+    PASS();
+}
+
+/* A call the HTTP service patterns classify (axios, an axios.create instance)
+ * gets exactly ONE HTTP_CALLS edge, typed with the verb its callee names. The
+ * arg-URL heuristic (detect_url_in_args, via=arg_url) exists for calls the
+ * patterns do not know -- a local fetch wrapper such as callApi('/api/orders')
+ * -- and must not add a second, method-less __route__ANY__ edge for the same
+ * call site. On microsoft/healthcare-ai-model-evaluator 59 of 129 HTTP_CALLS
+ * were such twins, and the cross-repo matcher bound them to server handlers of
+ * any method. `fillers` > 0 forces the parallel resolver (the RED case); 0
+ * keeps the sequential one, which must agree. */
+static int typed_http_no_url_twin_case(int fillers) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s/cbm_http_twin_XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+
+    write_temp_file(tmp, "src/api.ts",
+                    "import axios from 'axios';\n"
+                    "const axiosInstance = axios.create({ baseURL: 'http://localhost:5000' });\n"
+                    "export function getModel(id: string) {\n"
+                    "  return axiosInstance.get(`/api/models/${id}`);\n"
+                    "}\n"
+                    "export function addModel(body: unknown) {\n"
+                    "  return axiosInstance.post('/api/models', body);\n"
+                    "}\n"
+                    "export function removeModel(id: string) {\n"
+                    "  return axios.delete(`/api/models/${id}`);\n"
+                    "}\n");
+    write_temp_file(tmp, "src/wrapper.ts",
+                    "function callApi(path: string): Promise<Response> {\n"
+                    "  return fetch(path);\n"
+                    "}\n"
+                    "export function listOrders() {\n"
+                    "  return callApi('/api/orders');\n"
+                    "}\n");
+    for (int i = 0; i < fillers; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "src/filler%d.ts", i);
+        snprintf(body, sizeof(body), "export function filler%d(): number {\n  return %d;\n}\n", i,
+                 i);
+        write_temp_file(tmp, name, body);
+    }
+
+    char *old_workers = getenv("CBM_WORKERS");
+    char *saved = old_workers ? strdup(old_workers) : NULL;
+    cbm_setenv("CBM_WORKERS", "4", 1);
+
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, NULL, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+
+    cbm_store_t *s = th_open_repo_store(tmp);
+    ASSERT_NOT_NULL(s);
+
+    static const struct {
+        const char *caller;
+        const char *typed_route;
+    } typed[] = {{"getModel", "__route__GET__"},
+                 {"addModel", "__route__POST__"},
+                 {"removeModel", "__route__DELETE__"}};
+    for (size_t i = 0; i < sizeof(typed) / sizeof(typed[0]); i++) {
+        /* The typed edge stays ... */
+        ASSERT_EQ(http_calls_to_route(s, project, typed[i].caller, typed[i].typed_route), 1);
+        /* ... and it is the only HTTP_CALLS edge of that call site. */
+        ASSERT_EQ(http_calls_to_route(s, project, typed[i].caller, "__route__ANY__"), 0);
+        ASSERT_EQ(http_calls_to_route(s, project, typed[i].caller, "__route__"), 1);
+    }
+    if (fillers > 0) {
+        /* Control: the heuristic still covers the call no pattern knows. The
+         * sequential resolver has no arg-URL heuristic yet (#2235). */
+        ASSERT_EQ(http_calls_to_route(s, project, "listOrders", "__route__ANY__"), 1);
+    }
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    if (saved) {
+        cbm_setenv("CBM_WORKERS", saved, 1);
+        free(saved);
+    } else {
+        cbm_unsetenv("CBM_WORKERS");
+    }
+    th_rmtree(tmp);
+    PASS();
+}
+
+TEST(pipeline_typed_http_call_has_no_arg_url_twin) {
+    return typed_http_no_url_twin_case(52);
+}
+
+TEST(pipeline_typed_http_call_has_no_arg_url_twin_sequential) {
+    return typed_http_no_url_twin_case(0);
+}
+
+/* `import Axios from "axios"` -- the default-import binding capitalized, a
+ * common convention -- must classify `Axios.get/post/delete(url)` as HTTP
+ * client calls exactly like `axios.*`. The library table matched only the
+ * lowercase id, so the calls fell through to the `.get`/`.post` route-suffix
+ * fallback and became route REGISTRATIONS: on
+ * microsoft/Game-Control-Puzzle-Event-Administration-Tools all 69 client
+ * calls masqueraded as server Routes. A real Express registration in the same
+ * project stays a registration. `fillers` > 0 forces the parallel resolver,
+ * 0 keeps the sequential one; both classify through the same table. */
+static int capitalized_axios_case(int fillers) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s/cbm_axios_cap_XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+
+    write_temp_file(tmp, "src/service.ts",
+                    "import Axios from \"axios\";\n"
+                    "export function getSettings(eventId: string) {\n"
+                    "  return Axios.get(`/api/admin/events/${eventId}/settings`);\n"
+                    "}\n"
+                    "export function addUser(eventId: string, participant: unknown) {\n"
+                    "  return Axios.post(`/api/admin/users/${eventId}`, participant);\n"
+                    "}\n"
+                    "export function removeUser(id: string) {\n"
+                    "  return Axios.delete(`/api/admin/users/${id}`);\n"
+                    "}\n");
+    write_temp_file(tmp, "src/server.ts",
+                    "function listUsers(req: unknown, res: unknown) {}\n"
+                    "export function mount(router: any) {\n"
+                    "  router.get('/api/admin/users', listUsers);\n"
+                    "}\n");
+    for (int i = 0; i < fillers; i++) {
+        char name[64];
+        char body[128];
+        snprintf(name, sizeof(name), "src/filler%d.ts", i);
+        snprintf(body, sizeof(body), "export function filler%d(): number {\n  return %d;\n}\n", i,
+                 i);
+        write_temp_file(tmp, name, body);
+    }
+
+    char *old_workers = getenv("CBM_WORKERS");
+    char *saved = old_workers ? strdup(old_workers) : NULL;
+    cbm_setenv("CBM_WORKERS", "4", 1);
+
+    char db_path[512];
+    snprintf(db_path, sizeof(db_path), "%s/axios_cap.db", tmp);
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, NULL, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+
+    cbm_store_t *s = th_open_repo_store(tmp);
+    ASSERT_NOT_NULL(s);
+
+    static const struct {
+        const char *caller;
+        const char *typed_route;
+    } client[] = {{"getSettings", "__route__GET__"},
+                  {"addUser", "__route__POST__"},
+                  {"removeUser", "__route__DELETE__"}};
+    for (size_t i = 0; i < sizeof(client) / sizeof(client[0]); i++) {
+        ASSERT_EQ(route_registrations_from(s, project, client[i].caller), 0);
+        ASSERT_EQ(http_calls_to_route(s, project, client[i].caller, client[i].typed_route), 1);
+    }
+    /* Control: the server-side registration is untouched. */
+    ASSERT_EQ(route_registrations_from(s, project, "mount"), 1);
+    ASSERT_EQ(http_calls_to_route(s, project, "mount", "__route__"), 0);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    if (saved) {
+        cbm_setenv("CBM_WORKERS", saved, 1);
+        free(saved);
+    } else {
+        cbm_unsetenv("CBM_WORKERS");
+    }
+    th_rmtree(tmp);
+    PASS();
+}
+
+TEST(pipeline_capitalized_axios_import_is_http_client) {
+    return capitalized_axios_case(52);
+}
+
+TEST(pipeline_capitalized_axios_import_is_http_client_sequential) {
+    return capitalized_axios_case(0);
+}
+
+/* FastAPI/Starlette WebSocket route registration (distilled from #1245). The
+ * route-registration suffix table knew `.add_api_websocket_route` but not the
+ * decorator forms `.websocket` / `.websocket_route`, so a WebSocket endpoint
+ * registered via `@router.websocket('/ws')` produced no Route node at all —
+ * the endpoint was invisible to the graph. `@app.get('/health')` is the
+ * positive control (already a route suffix). Fewer than 50 files exercises
+ * pass_calls.c; the same suffix table drives the parallel resolver. */
+TEST(pipeline_python_websocket_decorators_register_routes) {
+    char tmp[256];
+    snprintf(tmp, sizeof(tmp), "%s/cbm_py_ws_routes_XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmp)) {
+        FAIL("tmpdir");
+    }
+
+    write_temp_file(tmp, "app.py",
+                    "from fastapi import APIRouter, FastAPI, WebSocket\n\n"
+                    "app = FastAPI()\n"
+                    "router = APIRouter()\n\n"
+                    "@app.get('/health')\n"
+                    "def health():\n"
+                    "    return {'ok': True}\n\n"
+                    "@router.websocket('/ws')\n"
+                    "async def ws_endpoint(websocket: WebSocket):\n"
+                    "    await websocket.accept()\n\n"
+                    "@app.websocket_route('/events')\n"
+                    "async def events_endpoint(websocket: WebSocket):\n"
+                    "    await websocket.accept()\n");
+
+    cbm_pipeline_t *p = cbm_pipeline_new(tmp, NULL, CBM_MODE_FULL);
+    ASSERT_NOT_NULL(p);
+    ASSERT_EQ(cbm_pipeline_run(p), 0);
+    const char *project = cbm_pipeline_project_name(p);
+
+    cbm_store_t *s = th_open_repo_store(tmp);
+    ASSERT_NOT_NULL(s);
+
+    /* Positive control: the HTTP decorator mints its Route node. */
+    ASSERT_GTE(count_nodes_named(s, project, "/health"), 1);
+    /* The two WebSocket decorator forms must mint Route nodes too. */
+    ASSERT_GTE(count_nodes_named(s, project, "/ws"), 1);
+    ASSERT_GTE(count_nodes_named(s, project, "/events"), 1);
+
+    cbm_store_close(s);
+    cbm_pipeline_free(p);
+    th_rmtree(tmp);
+    PASS();
+}
+
 /* The shape real Swift actually writes: the URL is built by a constructor and
  * force-unwrapped, so the literal is two levels below the argument list. This
  * is what issue #1892 reported from a real project. */
@@ -10082,6 +10978,8 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_zig_dependency_modules_resolve_through_build_zig_zon);
     RUN_TEST(pipeline_python_bare_local_binding_suppresses_weak_edge);
     RUN_TEST(pipeline_python_bare_local_binding_parallel_suppresses_weak_edge);
+    RUN_TEST(pipeline_external_import_binding_sequential_parallel);
+    RUN_TEST(pipeline_local_fetch_shadow_not_classified_as_http);
     /* Git history pass */
     RUN_TEST(githistory_is_trackable);
     RUN_TEST(githistory_compute_coupling);
@@ -10268,6 +11166,13 @@ SUITE(pipeline) {
     RUN_TEST(pipeline_swift_nested_url_makes_route_issue1892);
     RUN_TEST(pipeline_swift_http_call_makes_route_issue1892);
     RUN_TEST(pipeline_arg_url_rejects_non_http_slash_arguments);
+    RUN_TEST(pipeline_arg_url_rejects_document_file_paths);
+    RUN_TEST(pipeline_arg_url_skips_client_navigation);
+    RUN_TEST(pipeline_typed_http_call_has_no_arg_url_twin);
+    RUN_TEST(pipeline_typed_http_call_has_no_arg_url_twin_sequential);
+    RUN_TEST(pipeline_capitalized_axios_import_is_http_client);
+    RUN_TEST(pipeline_capitalized_axios_import_is_http_client_sequential);
+    RUN_TEST(pipeline_python_websocket_decorators_register_routes);
     RUN_TEST(pipeline_incremental_shared_infra_url_survives_owner_change);
     RUN_TEST(pipeline_incremental_handler_change_rematches_infra_route);
     RUN_TEST(incremental_detects_deleted_file);

@@ -1,11 +1,10 @@
 #include "test_framework.h"
 #include "graph_buffer/graph_buffer.h"
 #include "pipeline/pipeline_internal.h"
+#include "service_patterns.h"
 
 #include <stdbool.h>
 #include <stdint.h>
-
-bool cbm_service_pattern_is_http_route_literal(const char *literal, const char *callee_name);
 
 static int has_edge(cbm_gbuf_t *gb, int64_t source_id, int64_t target_id, const char *type) {
     const cbm_gbuf_edge_t **edges = NULL;
@@ -68,6 +67,92 @@ TEST(infrascan_http_route_literal_guard_rejects_filesystem_paths) {
     ASSERT_TRUE(cbm_service_pattern_is_http_route_literal("/api/orders", "requests.get"));
     ASSERT_TRUE(cbm_service_pattern_is_http_route_literal("https://orders.example/api/orders",
                                                           "requests.get"));
+    PASS();
+}
+
+/* Document/log extensions are never HTTP routes (distilled from PR #1245):
+ * the arg-URL detector runs for every resolved call, so without the
+ * extension guard `open("/new/file.txt")` minted a Route + HTTP_CALLS.
+ * First segments deliberately avoid the filesystem-root list so ONLY the
+ * extension guard can reject them; `/api/...` marker paths stay routes. */
+TEST(infrascan_http_route_literal_guard_rejects_document_extensions) {
+    ASSERT_FALSE(cbm_service_pattern_is_http_route_literal("/new/file.txt", "open"));
+    ASSERT_FALSE(cbm_service_pattern_is_http_route_literal("/docs/guide.md", "read"));
+    ASSERT_FALSE(cbm_service_pattern_is_http_route_literal("/data/app.log", "write"));
+    ASSERT_FALSE(cbm_service_pattern_is_http_route_literal("/fake/path.pdf", "open"));
+    ASSERT_FALSE(cbm_service_pattern_is_http_route_literal("/docs/index.rst", "open"));
+    /* Same extensions under a query string are still files. */
+    ASSERT_FALSE(cbm_service_pattern_is_http_route_literal("/docs/guide.md?raw=1", "open"));
+    /* Positive controls: extension-less routes and the same callees. */
+    ASSERT_TRUE(cbm_service_pattern_is_http_route_literal("/api/items", "requests.get"));
+    ASSERT_TRUE(cbm_service_pattern_is_http_route_literal("/docs/guide", "open"));
+    PASS();
+}
+
+/* Capitalized Axios import (`import Axios from "axios"`) and AxiosInstance
+ * must match CBM_SVC_HTTP, while glued lowercase continuations must not. */
+TEST(infrascan_service_pattern_match_capitalized_axios) {
+    ASSERT_EQ(cbm_service_pattern_match("Axios.get"), CBM_SVC_HTTP);
+    ASSERT_EQ(cbm_service_pattern_match("Axios.post"), CBM_SVC_HTTP);
+    ASSERT_EQ(cbm_service_pattern_match("AxiosInstance.get"), CBM_SVC_HTTP);
+    /* "Axios" glued to a lowercase continuation */
+    ASSERT_EQ(cbm_service_pattern_match("geo.Axiosphere.map"), CBM_SVC_NONE);
+    PASS();
+}
+
+/* #1250: client-side navigation is recognised only in the JS/TS family; genuine
+ * HTTP clients and route registrations are never mistaken for it, and with the
+ * file-language gate off nothing is suppressed (no other language's recall). */
+TEST(infrascan_client_navigation_is_js_family_only) {
+    const char *nav[] = {"this.router.navigateByUrl",
+                         "this.router.navigate",
+                         "navigateTo",
+                         "navigate",
+                         "this.navCtrl.navigateForward",
+                         "this.navCtrl.navigateRoot",
+                         "this.navCtrl.navigateBack",
+                         "router.push",
+                         "this.$router.push",
+                         "Router.replace",
+                         "props.history.push",
+                         "browserHistory.replace",
+                         "router.prefetch",
+                         "history.pushState",
+                         "window.history.replaceState",
+                         "this.location.go",
+                         "window.location.assign",
+                         "location.replace",
+                         "goto",
+                         "redirect",
+                         "permanentRedirect"};
+    for (size_t i = 0; i < sizeof(nav) / sizeof(nav[0]); i++) {
+        ASSERT_TRUE(cbm_service_pattern_is_client_navigation(true, nav[i]));
+        ASSERT_FALSE(cbm_service_pattern_is_client_navigation(false, nav[i]));
+    }
+    const char *http[] = {"fetch",
+                          "axios.get",
+                          "axios.post",
+                          "this.http.get",
+                          "this.http.post",
+                          "httpClient.put",
+                          "http",
+                          "api.patch",
+                          "router.get",
+                          "app.post",
+                          "items.push",
+                          "ky.get",
+                          "res.redirect",
+                          "client.go",
+                          "this.gotoApi",
+                          "$http.get",
+                          "navigateApi",
+                          "client.navigateRequest",
+                          "navigateToEndpoint"};
+    for (size_t i = 0; i < sizeof(http) / sizeof(http[0]); i++) {
+        ASSERT_FALSE(cbm_service_pattern_is_client_navigation(true, http[i]));
+    }
+    ASSERT_FALSE(cbm_service_pattern_is_client_navigation(true, NULL));
+    ASSERT_FALSE(cbm_service_pattern_is_client_navigation(true, ""));
     PASS();
 }
 
@@ -312,6 +397,9 @@ TEST(infrascan_grpc_routes_cover_services_past_64_proto_classes) {
 
 SUITE(infrascan) {
     RUN_TEST(infrascan_http_route_literal_guard_rejects_filesystem_paths);
+    RUN_TEST(infrascan_http_route_literal_guard_rejects_document_extensions);
+    RUN_TEST(infrascan_service_pattern_match_capitalized_axios);
+    RUN_TEST(infrascan_client_navigation_is_js_family_only);
     RUN_TEST(infrascan_route_nodes_skip_bad_http_url_paths);
     RUN_TEST(infrascan_http_calls_join_matching_handler_route);
     RUN_TEST(infrascan_infra_route_key_allowlist);

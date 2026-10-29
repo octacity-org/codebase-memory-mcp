@@ -281,6 +281,8 @@ typedef struct {
 typedef struct {
     const char *local_name;  // local alias or name
     const char *module_path; // resolved module path / QN
+    const char *member;      // ES named import: the exported name the local binds (`get` in
+                             // `import { get as navigate } from "axios"`); NULL otherwise
 } CBMImport;
 
 typedef enum {

@@ -3673,6 +3673,77 @@ TEST(extract_java_method_annotations_issue382) {
     PASS();
 }
 
+/* Distilled from PR #1245 (Andrew Hundt): unittest.mock's `@patch("x")` is a
+ * bare decorator whose name collides with the HTTP verb, and its only argument
+ * is a dotted target, not a path. The "/" fallback then minted a Route handler
+ * PATCH "/" for every mocked test function. Rule: a decorator call WITH
+ * arguments but no path-shaped one is not a route. */
+TEST(extract_python_mock_patch_is_not_route) {
+    CBMFileResult *r = extract("from unittest.mock import patch\n\n"
+                               "@patch(\"subprocess.run\")\n"
+                               "def test_cmd(mock_run):\n"
+                               "    pass\n\n"
+                               "@app.patch(\"/items/{id}\")\n"
+                               "def update_item():\n"
+                               "    pass\n",
+                               CBM_LANG_PYTHON, "t", "test_routes.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    const CBMDefinition *mocked = find_def_by_name(r, "test_cmd");
+    ASSERT_NOT_NULL(mocked);
+    ASSERT_NULL(mocked->route_path);
+    ASSERT_NULL(mocked->route_method);
+
+    const CBMDefinition *route = find_def_by_name(r, "update_item");
+    ASSERT_NOT_NULL(route);
+    ASSERT_STR_EQ(route->route_path, "/items/{id}");
+    ASSERT_STR_EQ(route->route_method, "PATCH");
+
+    cbm_free_result(r);
+    PASS();
+}
+
+/* Companion to the mock-patch case: the narrowing must not cost real routes.
+ * A receiver-less framework decorator with a path-shaped argument (Litestar /
+ * BlackSheep `@get("/x")`) stays a route, `@mock.patch("x")` (receiver, but
+ * no path) is not one, and a zero-argument `@app.route()` keeps the "/"
+ * default main emits today. */
+TEST(extract_python_bare_decorator_route_rules) {
+    CBMFileResult *r = extract("from litestar import get\n"
+                               "from unittest import mock\n\n"
+                               "@get(\"/health\")\n"
+                               "def health():\n"
+                               "    pass\n\n"
+                               "@mock.patch(\"os.getcwd\")\n"
+                               "def test_cwd(mock_cwd):\n"
+                               "    pass\n\n"
+                               "@app.route()\n"
+                               "def index():\n"
+                               "    pass\n",
+                               CBM_LANG_PYTHON, "t", "routes.py");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+
+    const CBMDefinition *health = find_def_by_name(r, "health");
+    ASSERT_NOT_NULL(health);
+    ASSERT_STR_EQ(health->route_path, "/health");
+    ASSERT_STR_EQ(health->route_method, "GET");
+
+    const CBMDefinition *mocked = find_def_by_name(r, "test_cwd");
+    ASSERT_NOT_NULL(mocked);
+    ASSERT_NULL(mocked->route_path);
+    ASSERT_NULL(mocked->route_method);
+
+    const CBMDefinition *index = find_def_by_name(r, "index");
+    ASSERT_NOT_NULL(index);
+    ASSERT_STR_EQ(index->route_path, "/");
+    ASSERT_STR_EQ(index->route_method, "ANY");
+
+    cbm_free_result(r);
+    PASS();
+}
+
 /* Find an in-body call by its raw callee text; returns the call or NULL. */
 static const CBMCall *find_call_by_callee(CBMFileResult *r, const char *callee) {
     for (int i = 0; i < r->calls.count; i++) {
@@ -6110,6 +6181,8 @@ SUITE(extraction) {
     RUN_TEST(js_index_module_qn_not_collide_with_folder);
     RUN_TEST(python_regular_module_qn_unchanged);
     RUN_TEST(extract_java_method_annotations_issue382);
+    RUN_TEST(extract_python_mock_patch_is_not_route);
+    RUN_TEST(extract_python_bare_decorator_route_rules);
     RUN_TEST(extract_ts_url_builder_issue1009);
     RUN_TEST(extract_ts_route_handler_after_named_middleware);
     RUN_TEST(extract_ts_route_handler_after_inline_middleware);
