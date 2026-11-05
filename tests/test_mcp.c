@@ -5679,6 +5679,23 @@ TEST(mcp_get_int_arg_bool_value) {
     PASS();
 }
 
+TEST(mcp_get_int_arg_out_of_range) {
+    /* A JSON integer wider than int must fall back to the default instead of
+     * wrapping: 4294967297 used to become 1 and 2147483648 became negative. */
+    int val = cbm_mcp_get_int_arg("{\"limit\":4294967297}", "limit", 7);
+    ASSERT_EQ(val, 7);
+    val = cbm_mcp_get_int_arg("{\"limit\":2147483648}", "limit", 7);
+    ASSERT_EQ(val, 7);
+    val = cbm_mcp_get_int_arg("{\"limit\":-2147483649}", "limit", 7);
+    ASSERT_EQ(val, 7);
+    /* In-range boundaries are still accepted. */
+    val = cbm_mcp_get_int_arg("{\"limit\":2147483647}", "limit", 7);
+    ASSERT_EQ(val, 2147483647);
+    val = cbm_mcp_get_int_arg("{\"limit\":-2147483648}", "limit", 7);
+    ASSERT_EQ(val, -2147483648);
+    PASS();
+}
+
 TEST(mcp_get_bool_arg_empty_json) {
     bool val = cbm_mcp_get_bool_arg("", "key");
     ASSERT_FALSE(val);
@@ -7130,6 +7147,7 @@ SUITE(mcp) {
     RUN_TEST(mcp_get_int_arg_empty_json);
     RUN_TEST(mcp_get_int_arg_string_value);
     RUN_TEST(mcp_get_int_arg_bool_value);
+    RUN_TEST(mcp_get_int_arg_out_of_range);
     RUN_TEST(mcp_get_bool_arg_empty_json);
     RUN_TEST(mcp_get_bool_arg_int_value);
     RUN_TEST(mcp_get_tool_name_empty_json);

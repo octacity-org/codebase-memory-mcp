@@ -79,6 +79,7 @@ enum {
 #endif
 #include <yyjson/yyjson.h>
 #include <stdint.h> // int64_t
+#include <limits.h> // INT_MIN, INT_MAX
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1032,7 +1033,13 @@ int cbm_mcp_get_int_arg(const char *args_json, const char *key, int default_val)
     yyjson_val *val = yyjson_obj_get(root, key);
     int result = default_val;
     if (val && yyjson_is_int(val)) {
-        result = yyjson_get_int(val);
+        /* Read the JSON integer as 64-bit and fall back to the default when it
+         * does not fit an int. Casting first wraps silently: limit 4294967297
+         * became 1, and 2147483648 became negative. */
+        int64_t wide = yyjson_get_sint(val);
+        if (wide >= (int64_t)INT_MIN && wide <= (int64_t)INT_MAX) {
+            result = (int)wide;
+        }
     }
     yyjson_doc_free(doc);
     return result;
