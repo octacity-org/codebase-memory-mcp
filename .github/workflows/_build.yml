@@ -169,7 +169,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           repository: ata-sesli/zova
-          ref: a30581ef7070ebc335fed06bbc46ea94a8326c5f
+          ref: 23a75306d6c9ff44a6bdf24c8120b302439ce726
           path: .ci/zova
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -182,7 +182,7 @@ jobs:
           test -f .ci/windows-zig/libzova_c.a
           test -f .ci/windows-zig/libcbm_zig.a
           test -f .ci/windows-zig/cbm_zova_bridge.o
-          grep -q 'Zova C ABI, v1.3.0' .ci/zova/include/zova.h
+          grep -q 'Zova C ABI, v1.4.0' .ci/zova/include/zova.h
           mkdir -p .ci/zova/zig-out/lib
           cp .ci/windows-zig/libzova_c.a .ci/zova/zig-out/lib/
           ZOVA_ROOT_PATH=$(cygpath -m "$GITHUB_WORKSPACE/.ci/zova")

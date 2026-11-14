@@ -541,8 +541,8 @@ check-zova:
 		echo "       Build Zova first with: cd $(ZOVA_ROOT) && zig build" >&2; \
 		exit 1; \
 	}
-	@grep -q "Zova C ABI, v1.3.0" "$(ZOVA_ROOT)/include/zova.h" || { \
-		echo "error: Zova C ABI 1.3.0 is required: $(ZOVA_ROOT)/include/zova.h" >&2; \
+	@grep -q "Zova C ABI, v1.4.0" "$(ZOVA_ROOT)/include/zova.h" || { \
+		echo "error: Zova C ABI 1.4.0 is required: $(ZOVA_ROOT)/include/zova.h" >&2; \
 		exit 1; \
 	}
 	@grep -q "zova_database_register_function" "$(ZOVA_ROOT)/include/zova.h" || { \

@@ -32,8 +32,8 @@ done
 
 format_version=$(sed -n 's/^pub const format_version = "\([^"]*\)";$/\1/p' "$SOURCE_VERSION_ZIG")
 abi_version=$(sed -n 's/^pub const abi_version_string = "\([^"]*\)";$/\1/p' "$SOURCE_VERSION_ZIG")
-if [[ "$format_version" != "12" ]]; then
-  echo "error: current Zova SDK must use format version 12, found: ${format_version:-missing}" >&2
+if [[ "$format_version" != "13" ]]; then
+  echo "error: current Zova SDK must use format version 13, found: ${format_version:-missing}" >&2
   exit 1
 fi
 if [[ -z "$abi_version" ]]; then

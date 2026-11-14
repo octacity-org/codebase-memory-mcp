@@ -145,7 +145,7 @@ only what changed.
 
 2.0 changes the stored data and removes several tools. What happens when you upgrade from 1.x:
 
-- **Database format.** A `cbm.zova` in an older Zova storage format (9–11) is converted once when
+- **Database format.** A `cbm.zova` in an older Zova storage format (9–12) is converted once when
   the new binary starts. The conversion writes a verified new file and then swaps it in. If it
   fails, the log names the fix: `codebase-memory-mcp zova-ops migrate-format --json`.
 - **Index format.** Each project takes one full re-index the next time it is indexed, instead of an
@@ -495,7 +495,7 @@ skipped with a warning. The full reference, including accepted language names, i
 Every indexed repository is an isolated workspace in one file,
 `${CBM_CACHE_DIR:-~/.cache/codebase-memory-mcp}/cbm.zova`. Zova stores the graph topology, edge
 payloads, traversal indexes, full-text rows, and int8 vectors natively, and the file survives agent
-and machine restarts. Current storage: CBM schema 7 on Zova storage format 12.
+and machine restarts. Current storage: CBM schema 7 on Zova storage format 13.
 
 `zova-ops` maintains that file. Every command needs `--json` and prints one JSON object. Exit code
 `0` is success or no-op, `1` is a refusal or failure, `2` is invalid syntax.

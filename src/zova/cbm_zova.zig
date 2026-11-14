@@ -833,8 +833,10 @@ fn databaseFormatStatus(maybe_path: ?Str) FormatStatus {
     if (format_text == null) return c.CBM_ZOVA_DATABASE_INCOMPATIBLE;
     const format = span(format_text);
     const eql = std.mem.eql;
-    if (eql(u8, format, "12") and schema == SCHEMA_VERSION) return c.CBM_ZOVA_DATABASE_COMPATIBLE;
-    if ((eql(u8, format, "9") or eql(u8, format, "10") or eql(u8, format, "11")) and schema == SCHEMA_VERSION) {
+    if (eql(u8, format, "13") and schema == SCHEMA_VERSION) return c.CBM_ZOVA_DATABASE_COMPATIBLE;
+    if ((eql(u8, format, "9") or eql(u8, format, "10") or eql(u8, format, "11") or eql(u8, format, "12")) and
+        schema == SCHEMA_VERSION)
+    {
         return c.CBM_ZOVA_DATABASE_MIGRATION_REQUIRED;
     }
     if (eql(u8, format, "7") and schema == 5) return c.CBM_ZOVA_DATABASE_REPACK_REQUIRED;

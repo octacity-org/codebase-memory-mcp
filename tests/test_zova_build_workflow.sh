@@ -83,13 +83,13 @@ printf 'dependency-v1\n' > "$FAKE_ZOVA/src/zova.zig"
 cat > "$FAKE_ZOVA/src/version.zig" <<'EOF'
 pub const package_version = "1.2.0";
 pub const abi_version_string = "1.2.0";
-pub const format_version = "12";
+pub const format_version = "13";
 EOF
 git -C "$FAKE_ZOVA" init -q
 git -C "$FAKE_ZOVA" config user.name "CBM Test"
 git -C "$FAKE_ZOVA" config user.email "cbm-test@example.invalid"
 git -C "$FAKE_ZOVA" add include/zova.h src/root.zig src/zova.zig src/version.zig
-git -C "$FAKE_ZOVA" commit -q -m "fake format-12 sdk"
+git -C "$FAKE_ZOVA" commit -q -m "fake format-13 sdk"
 FAKE_COMMIT=$(git -C "$FAKE_ZOVA" rev-parse HEAD)
 
 CBM_ZOVA_PIN_ROOT="$PINNED_ZOVA" \
@@ -108,7 +108,7 @@ grep -qx 'archive-v1' "$PINNED_ZOVA/zig-out/lib/libzova_c.a"
 grep -qx 'root-v1' "$PINNED_ZOVA/src/root.zig"
 grep -qx 'dependency-v1' "$PINNED_ZOVA/src/zova.zig"
 grep -qx "source_commit=$FAKE_COMMIT" "$PINNED_ZOVA/manifest.txt"
-grep -qx 'format_version=12' "$PINNED_ZOVA/manifest.txt"
+grep -qx 'format_version=13' "$PINNED_ZOVA/manifest.txt"
 grep -qx 'abi_version=1.2.0' "$PINNED_ZOVA/manifest.txt"
 grep -qx 'graph_edge_delete_many_symbol=zova_graph_edge_delete_many' "$PINNED_ZOVA/manifest.txt"
 grep -qx 'vector_delete_many_symbol=zova_vector_delete_many' "$PINNED_ZOVA/manifest.txt"

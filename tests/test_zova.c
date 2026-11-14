@@ -1213,6 +1213,13 @@ TEST(zova_database_format_status_requires_atomic_repack_for_v5_v7) {
 
     sqlite3 *db = NULL;
     ASSERT_EQ(sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, NULL), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(db, "UPDATE _zova_meta SET value='12' WHERE key='format_version'",
+                           NULL, NULL, NULL),
+              SQLITE_OK);
+    sqlite3_close(db);
+    ASSERT_EQ(cbm_zova_database_format_status(path), CBM_ZOVA_DATABASE_MIGRATION_REQUIRED);
+
+    ASSERT_EQ(sqlite3_open_v2(path, &db, SQLITE_OPEN_READWRITE, NULL), SQLITE_OK);
     ASSERT_EQ(sqlite3_exec(db, "UPDATE _zova_meta SET value='9' WHERE key='format_version'",
                            NULL, NULL, NULL),
               SQLITE_OK);

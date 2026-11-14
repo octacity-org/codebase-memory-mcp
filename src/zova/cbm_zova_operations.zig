@@ -1239,12 +1239,16 @@ pub export fn cbm_zova_database_compact(path: ?Str, out: ?*Report) Code {
 
         const compacted = if (operationsOpen(live, 0, 0, null)) |db| compacted: {
             defer _ = c.zova_database_close(db);
+            // Zova sets auto_vacuum on the source connection before copying,
+            // which commits a page-1 write to the WAL. Checkpoint again so the
+            // sidecar removal below never drops a committed frame.
             break :compacted operationsCheckpointTruncate(db) and
                 c.zova_database_compact(&c.zova_database_compact_request{
                     .db = db,
                     .destination_path = temporary,
                     .flags = 0,
-                }) == c.ZOVA_OK;
+                }) == c.ZOVA_OK and
+                operationsCheckpointTruncate(db);
         } else false;
         if (!compacted) {
             _ = operationsRemoveClosedDatabaseSidecars(temporary);

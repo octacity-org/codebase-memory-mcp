@@ -1075,14 +1075,16 @@ TEST(zova_operations_database_compact_noops_below_policy_threshold) {
 }
 
 
-/* tests/fixtures/zova-format-9/cbm.zova is a one-workspace database written
- * by release v1.0.1 (Zova 0.24.0, storage format 9, CBM schema 7). The test
- * migrates it in place, so it works on a copy. */
-static int operations_copy_format9_fixture(const char *destination) {
+/* Each tests/fixtures/zova-format-<n>/cbm.zova is a one-workspace database
+ * with CBM schema 7 written by an older release:
+ *   format 9:  release v1.0.1 (Zova 0.24.0), 18 nodes;
+ *   format 12: CBM built against Zova 1.3.0, 23 nodes.
+ * The tests migrate the fixture in place, so they work on a copy. */
+static int operations_copy_format_fixture(const char *fixture, const char *destination) {
     const char *directory = getenv("CBM_TEST_FIXTURE_DIR");
     char source[OPERATIONS_PATH_MAX];
-    snprintf(source, sizeof(source), "%s/zova-format-9/cbm.zova",
-             directory && directory[0] ? directory : "tests/fixtures");
+    snprintf(source, sizeof(source), "%s/%s/cbm.zova",
+             directory && directory[0] ? directory : "tests/fixtures", fixture);
     FILE *in = fopen(source, "rb");
     if (!in) return -1;
     FILE *out = fopen(destination, "wb");
@@ -1105,10 +1107,10 @@ static int operations_copy_format9_fixture(const char *destination) {
     return rc;
 }
 
-TEST(zova_operations_migrate_format_upgrades_format9_database) {
+static int operations_migrate_format_fixture(const char *fixture, int expected_nodes) {
     char path[OPERATIONS_PATH_MAX], leftover[OPERATIONS_PATH_MAX + 64];
-    operations_path(path, sizeof(path), "migrate-format-9");
-    ASSERT_EQ(operations_copy_format9_fixture(path), 0);
+    operations_path(path, sizeof(path), fixture);
+    ASSERT_EQ(operations_copy_format_fixture(fixture, path), 0);
     ASSERT_EQ(cbm_zova_database_format_status(path), CBM_ZOVA_DATABASE_MIGRATION_REQUIRED);
 
     cbm_zova_operation_report_t report = {0};
@@ -1129,7 +1131,7 @@ TEST(zova_operations_migrate_format_upgrades_format9_database) {
               SQLITE_OK);
     ASSERT_EQ(sqlite3_step(stmt), SQLITE_ROW);
     ASSERT_EQ(sqlite3_column_int(stmt, 0), 1);
-    ASSERT_EQ(sqlite3_column_int(stmt, 1), 18);
+    ASSERT_EQ(sqlite3_column_int(stmt, 1), expected_nodes);
     sqlite3_finalize(stmt);
     sqlite3_close(db);
 
@@ -1144,6 +1146,16 @@ TEST(zova_operations_migrate_format_upgrades_format9_database) {
     ASSERT_EQ(cbm_zova_database_migrate_format(path, &report), CBM_ZOVA_OPERATION_NOOP);
     ASSERT_STR_EQ(report.reason, "current_format");
     cbm_unlink(path);
+    return 0;
+}
+
+TEST(zova_operations_migrate_format_upgrades_format9_database) {
+    ASSERT_EQ(operations_migrate_format_fixture("zova-format-9", 18), 0);
+    PASS();
+}
+
+TEST(zova_operations_migrate_format_upgrades_format12_database) {
+    ASSERT_EQ(operations_migrate_format_fixture("zova-format-12", 23), 0);
     PASS();
 }
 
@@ -3535,6 +3547,7 @@ SUITE(zova_operations) {
     RUN_TEST(zova_operations_workspace_delete_is_isolated_reported_and_idempotent);
     RUN_TEST(zova_operations_refuse_while_index_coordination_is_held);
     RUN_TEST(zova_operations_migrate_format_upgrades_format9_database);
+    RUN_TEST(zova_operations_migrate_format_upgrades_format12_database);
     RUN_TEST(zova_operations_database_compact_noops_below_policy_threshold);
     RUN_TEST(zova_operations_database_compact_reclaims_verified_database);
     RUN_TEST(zova_operations_database_compact_preserves_two_workspace_public_state);
