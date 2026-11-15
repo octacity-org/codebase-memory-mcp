@@ -558,6 +558,34 @@ pub export fn cbm_watcher_watch_count(w_c: ?*Watcher) c_int {
     return count;
 }
 
+pub export fn cbm_watcher_project_info(
+    w_c: ?*Watcher,
+    project_name_c: ?Str,
+    out: ?*c.cbm_watcher_project_info_t,
+) bool {
+    if (out) |o| {
+        o.* = std.mem.zeroes(c.cbm_watcher_project_info_t);
+    }
+    const w = w_c orelse return false;
+    const project_name = project_name_c orelse return false;
+    const o = out orelse return false;
+
+    w.lock();
+    defer w.unlock();
+
+    const s = w.getState(project_name) orelse return false;
+    if (!s.baseline_done) {
+        initBaseline(s);
+    }
+    if (s.is_git) {
+        o.strategy = c.CBM_WATCHER_STRATEGY_GIT;
+    } else {
+        o.strategy = c.CBM_WATCHER_STRATEGY_NONE;
+    }
+    o.poll_interval_ms = s.interval_ms;
+    return true;
+}
+
 // ── Single poll cycle ──────────────────────────────────────────────
 
 fn nowNs() i64 {

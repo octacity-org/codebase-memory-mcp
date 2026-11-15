@@ -2221,6 +2221,50 @@ TEST(watcher_null_watch_count) {
     PASS();
 }
 
+TEST(watcher_project_info_reports_status) {
+    cbm_watcher_project_info_t info;
+    /* NULL safety */
+    ASSERT_FALSE(cbm_watcher_project_info(NULL, "p", &info));
+
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *w = cbm_watcher_new(store, index_callback, NULL);
+    ASSERT_NOT_NULL(w);
+
+    ASSERT_FALSE(cbm_watcher_project_info(w, NULL, &info));
+    ASSERT_FALSE(cbm_watcher_project_info(w, "nonexistent", &info));
+    ASSERT_FALSE(cbm_watcher_project_info(w, "p", NULL));
+
+    /* Non-git directory */
+    char nongit[256];
+    snprintf(nongit, sizeof(nongit), "/tmp/cbm_watcher_nongit_info_XXXXXX");
+    if (!cbm_mkdtemp(nongit))
+        FAIL("cbm_mkdtemp failed");
+    cbm_watcher_watch(w, "nongit-proj", nongit);
+    ASSERT_TRUE(cbm_watcher_project_info(w, "nongit-proj", &info));
+    ASSERT_EQ(info.strategy, CBM_WATCHER_STRATEGY_NONE);
+
+    /* Git repository */
+    char gitdir[256];
+    snprintf(gitdir, sizeof(gitdir), "/tmp/cbm_watcher_git_info_XXXXXX");
+    if (!cbm_mkdtemp(gitdir))
+        FAIL("cbm_mkdtemp failed");
+    if (wt_git(gitdir, "init -q") != 0) {
+        th_rmtree(gitdir);
+        th_rmtree(nongit);
+        FAIL("git init failed");
+    }
+    cbm_watcher_watch(w, "git-proj", gitdir);
+    ASSERT_TRUE(cbm_watcher_project_info(w, "git-proj", &info));
+    ASSERT_EQ(info.strategy, CBM_WATCHER_STRATEGY_GIT);
+    ASSERT_GT(info.poll_interval_ms, 0);
+
+    cbm_watcher_free(w);
+    cbm_store_close(store);
+    th_rmtree(nongit);
+    th_rmtree(gitdir);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  SUITE
  * ══════════════════════════════════════════════════════════════════ */
@@ -2311,4 +2355,5 @@ SUITE(watcher) {
     RUN_TEST(watcher_change_during_index_stays_pending);
     RUN_TEST(watcher_null_poll_once);
     RUN_TEST(watcher_null_watch_count);
+    RUN_TEST(watcher_project_info_reports_status);
 }

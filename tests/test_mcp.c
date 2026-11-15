@@ -2582,10 +2582,83 @@ TEST(tool_index_status_includes_git_metadata) {
     ASSERT_NOT_NULL(strstr(inner, "\"git\""));
     ASSERT_NOT_NULL(strstr(inner, "\"is_git\":false"));
     ASSERT_NOT_NULL(strstr(inner, "\"root_exists\":true"));
+    ASSERT_NOT_NULL(strstr(inner, "\"watch\""));
+    ASSERT_NOT_NULL(strstr(inner, "\"watched\":false"));
+    ASSERT_NOT_NULL(strstr(inner, "\"reason\":\"watcher_disabled\""));
 
     free(inner);
     free(resp);
     cbm_mcp_server_free(srv);
+    cleanup_snippet_dir(tmp);
+    PASS();
+}
+
+TEST(tool_index_status_reports_watch_state) {
+    char tmp[256];
+    cbm_mcp_server_t *srv = setup_snippet_server(tmp, sizeof(tmp));
+    ASSERT_NOT_NULL(srv);
+
+    char proj_dir[512];
+    snprintf(proj_dir, sizeof(proj_dir), "%s/project", tmp);
+
+    cbm_store_t *wstore = cbm_store_open_memory();
+    cbm_watcher_t *w = cbm_watcher_new(wstore, NULL, NULL);
+    ASSERT_NOT_NULL(w);
+    cbm_mcp_server_set_watcher(srv, w);
+
+    /* 1. Registered non-git project -> watched: false, reason: not_a_git_repository */
+    cbm_watcher_watch(w, "test-project", proj_dir);
+    char *resp1 =
+        cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
+                                   "\"params\":{\"name\":\"index_status\","
+                                   "\"arguments\":{\"project\":\"test-project\"}}}");
+    ASSERT_NOT_NULL(resp1);
+    char *inner1 = extract_text_content(resp1);
+    ASSERT_NOT_NULL(inner1);
+    ASSERT_NOT_NULL(strstr(inner1, "\"watched\":false"));
+    ASSERT_NOT_NULL(strstr(inner1, "\"reason\":\"not_a_git_repository\""));
+    free(inner1);
+    free(resp1);
+
+    /* 2. Registered git project -> watched: true, strategy: git */
+    char cmd[512];
+    snprintf(cmd, sizeof(cmd), "git -C \"%s\" init -q", proj_dir);
+    (void)system(cmd);
+    cbm_watcher_watch(w, "test-project", proj_dir);
+    char *resp2 =
+        cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\","
+                                   "\"params\":{\"name\":\"index_status\","
+                                   "\"arguments\":{\"project\":\"test-project\"}}}");
+    ASSERT_NOT_NULL(resp2);
+    char *inner2 = extract_text_content(resp2);
+    ASSERT_NOT_NULL(inner2);
+    ASSERT_NOT_NULL(strstr(inner2, "\"watched\":true"));
+    ASSERT_NOT_NULL(strstr(inner2, "\"strategy\":\"git\""));
+    free(inner2);
+    free(resp2);
+
+    /* 3. auto_watch disabled in config -> watched: false, reason: auto_watch_off */
+    cbm_config_t *cfg = cbm_config_open(tmp);
+    if (cfg) {
+        cbm_config_set(cfg, CBM_CONFIG_AUTO_WATCH, "false");
+        cbm_mcp_server_set_config(srv, cfg);
+        char *resp3 =
+            cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\","
+                                       "\"params\":{\"name\":\"index_status\","
+                                       "\"arguments\":{\"project\":\"test-project\"}}}");
+        ASSERT_NOT_NULL(resp3);
+        char *inner3 = extract_text_content(resp3);
+        ASSERT_NOT_NULL(inner3);
+        ASSERT_NOT_NULL(strstr(inner3, "\"watched\":false"));
+        ASSERT_NOT_NULL(strstr(inner3, "\"reason\":\"auto_watch_off\""));
+        free(inner3);
+        free(resp3);
+        cbm_config_close(cfg);
+    }
+
+    cbm_mcp_server_free(srv);
+    cbm_watcher_free(w);
+    cbm_store_close(wstore);
     cleanup_snippet_dir(tmp);
     PASS();
 }
@@ -7181,6 +7254,7 @@ SUITE(mcp) {
     RUN_TEST(tool_query_graph_count_ignores_max_rows);
     RUN_TEST(tool_index_status_no_project);
     RUN_TEST(tool_index_status_includes_git_metadata);
+    RUN_TEST(tool_index_status_reports_watch_state);
 
     /* Tool handlers with validation */
     RUN_TEST(tool_trace_call_path_not_found);
