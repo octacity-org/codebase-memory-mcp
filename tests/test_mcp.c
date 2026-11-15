@@ -4747,6 +4747,58 @@ TEST(tool_detect_changes_reports_impacted_symbols) {
     PASS();
 }
 
+/* #124: detect_changes without base_branch must diff against the repository's
+ * default branch, not a hardcoded "main". In a repository whose only branch is
+ * "master", it must resolve "master" and detect committed changes on feature. */
+TEST(tool_detect_changes_resolves_default_branch_master) {
+    const char *proj = "detect-default-master";
+    char *tmp = th_mktempdir("cbm_detect_master");
+    ASSERT_NOT_NULL(tmp);
+
+    char cmd[CBM_SZ_1K];
+    snprintf(cmd, sizeof(cmd),
+             "git -C \"%s\" -c init.defaultBranch=master init -q", tmp);
+    ASSERT_EQ(system(cmd), 0);
+
+    ASSERT_EQ(th_write_file(TH_PATH(tmp, "base.txt"), "base content\n"), 0);
+    snprintf(cmd, sizeof(cmd),
+             "git -C \"%s\" add base.txt && "
+             "git -C \"%s\" -c user.name=t -c user.email=t@t.io -c commit.gpgsign=false commit -q -m \"initial\"",
+             tmp, tmp);
+    ASSERT_EQ(system(cmd), 0);
+
+    snprintf(cmd, sizeof(cmd), "git -C \"%s\" checkout -q -b feature", tmp);
+    ASSERT_EQ(system(cmd), 0);
+
+    ASSERT_EQ(th_write_file(TH_PATH(tmp, "feature.txt"), "feature content\n"), 0);
+    snprintf(cmd, sizeof(cmd),
+             "git -C \"%s\" add feature.txt && "
+             "git -C \"%s\" -c user.name=t -c user.email=t@t.io -c commit.gpgsign=false commit -q -m \"feature\"",
+             tmp, tmp);
+    ASSERT_EQ(system(cmd), 0);
+
+    cbm_store_t *fixture = cbm_store_open_memory();
+    ASSERT_NOT_NULL(fixture);
+    ASSERT_EQ(cbm_store_upsert_project(fixture, proj, tmp), CBM_STORE_OK);
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(fixture, proj), 0);
+    cbm_store_close(fixture);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    ASSERT_NOT_NULL(srv);
+
+    char *resp = cbm_mcp_handle_tool(srv, "detect_changes", "{\"project\":\"detect-default-master\"}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NULL(strstr(resp, "\"isError\":true"));
+    ASSERT_NOT_NULL(strstr(resp, "feature.txt"));
+    ASSERT_NULL(strstr(resp, "base.txt"));
+    free(resp);
+
+    cbm_mcp_server_free(srv);
+    th_cleanup(tmp);
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  IDLE STORE EVICTION
  * ══════════════════════════════════════════════════════════════════ */
@@ -7238,6 +7290,7 @@ SUITE(mcp) {
     RUN_TEST(index_recovery_parallel_quarantines_crasher);
     RUN_TEST(tool_detect_changes_not_found_rich_error);
     RUN_TEST(tool_detect_changes_reports_impacted_symbols);
+    RUN_TEST(tool_detect_changes_resolves_default_branch_master);
 
     /* Query store read-only (data integrity) */
 

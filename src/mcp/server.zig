@@ -72,6 +72,73 @@ fn isPorcelainCode(ch: u8) bool {
     return std.mem.indexOfScalar(u8, " MADRCU?!", ch) != null;
 }
 
+/// Run one contained git query and return its first output line, or false if the
+/// command fails, prints nothing, or yields a string unsafe for shell interpolation.
+fn detectGitFirstLine(root: []const u8, git_args: []const u8, out_buf: []u8) bool {
+    var cmd: [2048]u8 = undefined;
+    const null_dev = if (is_windows) "2>NUL" else "2>/dev/null";
+    const q = if (is_windows) "\"" else "'";
+    const cmd_z = mcp.fmtZ(&cmd, "git -C {s}{s}{s} {s} {s}", .{ q, root, q, git_args, null_dev });
+
+    const fp = c.cbm_popen_git(cmd_z);
+    if (fp == null) return false;
+
+    var raw_line: [1024]u8 = undefined;
+    const got = c.fgets(&raw_line, raw_line.len, fp);
+    const rc = c.cbm_pclose(fp);
+    if (got == null or rc != 0) return false;
+
+    const s = std.mem.trimEnd(u8, std.mem.sliceTo(&raw_line, 0), "\r\n ");
+    if (s.len == 0 or s.len >= out_buf.len) return false;
+    if (s[0] == '-') return false;
+
+    @memcpy(out_buf[0..s.len], s);
+    out_buf[s.len] = 0;
+    const out_c: CStr = @ptrCast(out_buf.ptr);
+    if (!c.cbm_validate_shell_arg(out_c)) return false;
+    if (is_windows) {
+        for (s) |ch| {
+            if (ch == '%' or ch == '!' or ch == '^') return false;
+        }
+    }
+    return true;
+}
+
+/// #124: without base_branch, diff against the repository's default branch rather
+/// than a literal "main" that trunk/master/develop repositories do not have.
+/// Order: origin/HEAD (what the clone calls the default), local main, local master,
+/// then the current branch's upstream. Fallback: "main".
+fn detectDefaultBase(root_path: CStr) HeapStr {
+    const root = sp(root_path);
+    var buf: [1024]u8 = undefined;
+    const q = if (is_windows) "\"" else "'";
+
+    // 1. origin/HEAD (what the clone calls the default)
+    if (detectGitFirstLine(root, "symbolic-ref -q --short refs/remotes/origin/HEAD", &buf)) {
+        return mcp.dup(@as(CStr, @ptrCast(&buf)));
+    }
+
+    // 2. local main or master
+    const local_defaults = [_]CStr{ "main", "master" };
+    for (local_defaults) |branch_name| {
+        var verify_arg: [256]u8 = undefined;
+        _ = mcp.bprint(&verify_arg, "rev-parse -q --verify {s}refs/heads/{s}^{{commit}}{s}", .{ q, sp(branch_name), q });
+        if (detectGitFirstLine(root, mcp.bufStr(&verify_arg), &buf)) {
+            return mcp.dup(branch_name);
+        }
+    }
+
+    // 3. current branch's upstream
+    var upstream_arg: [128]u8 = undefined;
+    _ = mcp.bprint(&upstream_arg, "rev-parse -q --abbrev-ref --symbolic-full-name {s}@{{upstream}}{s}", .{ q, q });
+    if (detectGitFirstLine(root, mcp.bufStr(&upstream_arg), &buf)) {
+        return mcp.dup(@as(CStr, @ptrCast(&buf)));
+    }
+
+    // 4. fallback to "main"
+    return mcp.dup("main");
+}
+
 fn handleDetectChanges(srv: *Server, args: CStr) HeapStr {
     const project = mcp.getProjectArg(args);
     var base_branch = mcp.strArg(args, "base_branch");
@@ -95,16 +162,17 @@ fn handleDetectChanges(srv: *Server, args: CStr) HeapStr {
     } else {
         c.free(since);
     }
-    if (base_branch == null) base_branch = mcp.dup("main");
 
     // Reject shell metacharacters, and a leading '-', in the user-supplied
     // branch name. base_branch is spliced into `git diff --name-only
     // "<base>"...HEAD`; a value starting with '-' would be read by git as an
     // option rather than a ref (e.g. `--output=<path>` writes the diff to an
     // arbitrary file). A real git ref never begins with '-'.
-    if (!c.cbm_validate_shell_arg(base_branch) or base_branch[0] == '-') {
-        c.free(project);
-        return textResult("base_branch contains invalid characters", true);
+    if (base_branch != null) {
+        if (!c.cbm_validate_shell_arg(base_branch) or base_branch[0] == '-') {
+            c.free(project);
+            return textResult("base_branch contains invalid characters", true);
+        }
     }
 
     const root_path = code_tools.getProjectRoot(project);
@@ -114,6 +182,12 @@ fn handleDetectChanges(srv: *Server, args: CStr) HeapStr {
 
     if (!search_tools.validateSearchPathArg(root_path)) {
         return textResult("project path contains invalid characters", true);
+    }
+
+    // Without base_branch, diff against the repository's default branch rather
+    // than a literal "main" that repositories may not have (#124).
+    if (base_branch == null) {
+        base_branch = detectDefaultBase(root_path);
     }
 
     // Get changed files via git (-C avoids cd + quoting issues on Windows).
