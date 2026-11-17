@@ -2241,7 +2241,13 @@ TEST(watcher_project_info_reports_status) {
         FAIL("cbm_mkdtemp failed");
     cbm_watcher_watch(w, "nongit-proj", nongit);
     ASSERT_TRUE(cbm_watcher_project_info(w, "nongit-proj", &info));
+    ASSERT_EQ(info.strategy, CBM_WATCHER_STRATEGY_PENDING);
+    ASSERT_EQ(info.last_scan_unix_s, 0);
+
+    cbm_watcher_poll_once(w);
+    ASSERT_TRUE(cbm_watcher_project_info(w, "nongit-proj", &info));
     ASSERT_EQ(info.strategy, CBM_WATCHER_STRATEGY_NONE);
+    ASSERT_GT(info.last_scan_unix_s, 0);
 
     /* Git repository */
     char gitdir[256];
@@ -2255,8 +2261,14 @@ TEST(watcher_project_info_reports_status) {
     }
     cbm_watcher_watch(w, "git-proj", gitdir);
     ASSERT_TRUE(cbm_watcher_project_info(w, "git-proj", &info));
+    ASSERT_EQ(info.strategy, CBM_WATCHER_STRATEGY_PENDING);
+    ASSERT_EQ(info.last_scan_unix_s, 0);
+
+    cbm_watcher_poll_once(w);
+    ASSERT_TRUE(cbm_watcher_project_info(w, "git-proj", &info));
     ASSERT_EQ(info.strategy, CBM_WATCHER_STRATEGY_GIT);
     ASSERT_GT(info.poll_interval_ms, 0);
+    ASSERT_GT(info.last_scan_unix_s, 0);
 
     cbm_watcher_free(w);
     cbm_store_close(store);

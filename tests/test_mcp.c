@@ -2608,6 +2608,7 @@ TEST(tool_index_status_reports_watch_state) {
 
     /* 1. Registered non-git project -> watched: false, reason: not_a_git_repository */
     cbm_watcher_watch(w, "test-project", proj_dir);
+    cbm_watcher_poll_once(w);
     char *resp1 =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\","
                                    "\"params\":{\"name\":\"index_status\","
@@ -2625,6 +2626,7 @@ TEST(tool_index_status_reports_watch_state) {
     snprintf(cmd, sizeof(cmd), "git -C \"%s\" init -q", proj_dir);
     (void)system(cmd);
     cbm_watcher_watch(w, "test-project", proj_dir);
+    cbm_watcher_poll_once(w);
     char *resp2 =
         cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\","
                                    "\"params\":{\"name\":\"index_status\","
@@ -2634,25 +2636,56 @@ TEST(tool_index_status_reports_watch_state) {
     ASSERT_NOT_NULL(inner2);
     ASSERT_NOT_NULL(strstr(inner2, "\"watched\":true"));
     ASSERT_NOT_NULL(strstr(inner2, "\"strategy\":\"git\""));
+    ASSERT_NOT_NULL(strstr(inner2, "\"poll_interval_ms\":"));
+    ASSERT_NOT_NULL(strstr(inner2, "\"last_scan_unix_s\":"));
     free(inner2);
     free(resp2);
 
-    /* 3. auto_watch disabled in config -> watched: false, reason: auto_watch_off */
+    /* 3. Catalog selector differs from full project name ("project" vs "test-project") */
+    char *resp_sel =
+        cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\","
+                                   "\"params\":{\"name\":\"index_status\","
+                                   "\"arguments\":{\"project\":\"project\"}}}");
+    ASSERT_NOT_NULL(resp_sel);
+    char *inner_sel = extract_text_content(resp_sel);
+    ASSERT_NOT_NULL(inner_sel);
+    ASSERT_NOT_NULL(strstr(inner_sel, "\"watched\":true"));
+    ASSERT_NOT_NULL(strstr(inner_sel, "\"strategy\":\"git\""));
+    free(inner_sel);
+    free(resp_sel);
+
+    /* 4. auto_watch disabled in config and project unwatched -> watched: false, reason: auto_watch_off */
+    cbm_watcher_unwatch(w, "test-project");
     cbm_config_t *cfg = cbm_config_open(tmp);
     if (cfg) {
         cbm_config_set(cfg, CBM_CONFIG_AUTO_WATCH, "false");
         cbm_mcp_server_set_config(srv, cfg);
-        char *resp3 =
-            cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\","
+        char *resp4 =
+            cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\","
                                        "\"params\":{\"name\":\"index_status\","
                                        "\"arguments\":{\"project\":\"test-project\"}}}");
-        ASSERT_NOT_NULL(resp3);
-        char *inner3 = extract_text_content(resp3);
-        ASSERT_NOT_NULL(inner3);
-        ASSERT_NOT_NULL(strstr(inner3, "\"watched\":false"));
-        ASSERT_NOT_NULL(strstr(inner3, "\"reason\":\"auto_watch_off\""));
-        free(inner3);
-        free(resp3);
+        ASSERT_NOT_NULL(resp4);
+        char *inner4 = extract_text_content(resp4);
+        ASSERT_NOT_NULL(inner4);
+        ASSERT_NOT_NULL(strstr(inner4, "\"watched\":false"));
+        ASSERT_NOT_NULL(strstr(inner4, "\"reason\":\"auto_watch_off\""));
+        free(inner4);
+        free(resp4);
+
+        /* 5. Project not registered and auto_watch enabled -> watched: false, reason: not_registered */
+        cbm_config_set(cfg, CBM_CONFIG_AUTO_WATCH, "true");
+        char *resp5 =
+            cbm_mcp_server_handle(srv, "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/call\","
+                                       "\"params\":{\"name\":\"index_status\","
+                                       "\"arguments\":{\"project\":\"test-project\"}}}");
+        ASSERT_NOT_NULL(resp5);
+        char *inner5 = extract_text_content(resp5);
+        ASSERT_NOT_NULL(inner5);
+        ASSERT_NOT_NULL(strstr(inner5, "\"watched\":false"));
+        ASSERT_NOT_NULL(strstr(inner5, "\"reason\":\"not_registered\""));
+        free(inner5);
+        free(resp5);
+
         cbm_config_close(cfg);
     }
 
