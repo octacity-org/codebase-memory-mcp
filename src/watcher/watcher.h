@@ -83,7 +83,7 @@ typedef enum {
 typedef struct {
     cbm_watcher_strategy_t strategy;
     int poll_interval_ms;     /* current adaptive cadence */
-    int64_t last_scan_unix_s; /* wall clock of the last completed scan; 0 = none */
+    int64_t last_scan_unix_s; /* wall clock of the last completed poll scan (0 = none; updated on every scan even when reindex is skipped or fails) */
 } cbm_watcher_project_info_t;
 
 /* Return true when project_name is physically watched and fill *out with its
