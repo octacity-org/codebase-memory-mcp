@@ -524,7 +524,9 @@ const tools = [_]ToolDef{
     .{
         .name = "index_status",
         .title = "Index status",
-        .description = "Get the indexing status of a project",
+        .description = "Get the indexing status of a project. Returns node/edge counts, root_path, git metadata, " ++
+            "and watch status (watched, strategy: git | pending, poll_interval_ms, last_scan_unix_s, or " ++
+            "reason: watcher_disabled | auto_watch_off | not_a_git_repository | not_session_project | not_registered).",
         .input_schema = "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"}},\"required\":[" ++
             "\"project\"]}",
     },

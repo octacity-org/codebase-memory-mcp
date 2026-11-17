@@ -91,6 +91,10 @@ const ProjectState = struct {
     interval_ms: c_int,
     /// next poll time (monotonic ns)
     next_poll_ns: i64,
+    /// Published fields for cbm_watcher_project_info (guarded by projects_lock):
+    published_strategy: c.cbm_watcher_strategy_t,
+    published_interval_ms: c_int,
+    last_scan_unix_s: i64,
 
     fn name(s: *const ProjectState) Str {
         return s.project_name.?;
@@ -339,6 +343,9 @@ fn stateNew(project_name: Str, root_path: Str) ?*ProjectState {
     s.project_name = dupZ(project_name);
     s.root_path = dupZ(root_path);
     s.interval_ms = POLL_BASE_MS;
+    s.published_strategy = c.CBM_WATCHER_STRATEGY_PENDING;
+    s.published_interval_ms = POLL_BASE_MS;
+    s.last_scan_unix_s = 0;
     return s;
 }
 
@@ -558,6 +565,28 @@ pub export fn cbm_watcher_watch_count(w_c: ?*Watcher) c_int {
     return count;
 }
 
+pub export fn cbm_watcher_project_info(
+    w_c: ?*Watcher,
+    project_name_c: ?Str,
+    out: ?*c.cbm_watcher_project_info_t,
+) bool {
+    if (out) |o| {
+        o.* = std.mem.zeroes(c.cbm_watcher_project_info_t);
+    }
+    const w = w_c orelse return false;
+    const project_name = project_name_c orelse return false;
+    const o = out orelse return false;
+
+    w.lock();
+    defer w.unlock();
+
+    const s = w.getState(project_name) orelse return false;
+    o.strategy = s.published_strategy;
+    o.poll_interval_ms = s.published_interval_ms;
+    o.last_scan_unix_s = s.last_scan_unix_s;
+    return true;
+}
+
 // ── Single poll cycle ──────────────────────────────────────────────
 
 fn nowNs() i64 {
@@ -698,6 +727,11 @@ fn pollProject(w: *Watcher, s: *ProjectState, now: i64, reindexed: *c_int) void 
     // Initialize baseline on first poll.
     if (!s.baseline_done) {
         initBaseline(s);
+        w.lock();
+        s.published_strategy = if (s.is_git) c.CBM_WATCHER_STRATEGY_GIT else c.CBM_WATCHER_STRATEGY_NONE;
+        s.published_interval_ms = s.interval_ms;
+        s.last_scan_unix_s = @as(i64, c.time(null));
+        w.unlock();
         return;
     }
 
@@ -710,6 +744,10 @@ fn pollProject(w: *Watcher, s: *ProjectState, now: i64, reindexed: *c_int) void 
     // Check for changes.
     if (!checkChanges(s)) {
         s.next_poll_ns = now + @as(i64, s.interval_ms) * NS_PER_MS;
+        w.lock();
+        s.published_interval_ms = s.interval_ms;
+        s.last_scan_unix_s = @as(i64, c.time(null));
+        w.unlock();
         return;
     }
 
@@ -744,6 +782,10 @@ fn pollProject(w: *Watcher, s: *ProjectState, now: i64, reindexed: *c_int) void 
     }
 
     s.next_poll_ns = now + @as(i64, s.interval_ms) * NS_PER_MS;
+    w.lock();
+    s.published_interval_ms = s.interval_ms;
+    s.last_scan_unix_s = @as(i64, c.time(null));
+    w.unlock();
 }
 
 /// Snapshot of project state pointers, filled under the lock.

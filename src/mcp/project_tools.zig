@@ -531,7 +531,54 @@ pub fn coverageSnippetNote(repo: ?*c.cbm_zova_repository_t, workspace_id: CStr, 
 
 // ── index_status ─────────────────────────────────────────────────
 
-pub fn handleIndexStatus(_: *Server, args: CStr) HeapStr {
+fn addWatchStatusJson(srv: *Server, doc: ?*MutDoc, root: ?*MutVal, project: CStr) void {
+    const watch = c.yyjson_mut_obj(doc);
+    _ = c.yyjson_mut_obj_add_val(doc, root, "watch", watch);
+
+    if (srv.watcher == null) {
+        _ = c.yyjson_mut_obj_add_bool(doc, watch, "watched", false);
+        _ = c.yyjson_mut_obj_add_str(doc, watch, "reason", "watcher_disabled");
+        return;
+    }
+
+    var info = std.mem.zeroes(c.cbm_watcher_project_info_t);
+    if (c.cbm_watcher_project_info(srv.watcher, project, &info)) {
+        switch (info.strategy) {
+            c.CBM_WATCHER_STRATEGY_GIT => {
+                _ = c.yyjson_mut_obj_add_bool(doc, watch, "watched", true);
+                _ = c.yyjson_mut_obj_add_str(doc, watch, "strategy", "git");
+                _ = c.yyjson_mut_obj_add_int(doc, watch, "poll_interval_ms", info.poll_interval_ms);
+                if (info.last_scan_unix_s > 0) {
+                    _ = c.yyjson_mut_obj_add_int(doc, watch, "last_scan_unix_s", info.last_scan_unix_s);
+                }
+                return;
+            },
+            c.CBM_WATCHER_STRATEGY_PENDING => {
+                _ = c.yyjson_mut_obj_add_bool(doc, watch, "watched", true);
+                _ = c.yyjson_mut_obj_add_str(doc, watch, "strategy", "pending");
+                _ = c.yyjson_mut_obj_add_int(doc, watch, "poll_interval_ms", info.poll_interval_ms);
+                return;
+            },
+            c.CBM_WATCHER_STRATEGY_NONE => {
+                _ = c.yyjson_mut_obj_add_bool(doc, watch, "watched", false);
+                _ = c.yyjson_mut_obj_add_str(doc, watch, "reason", "not_a_git_repository");
+                return;
+            },
+            else => {},
+        }
+    }
+
+    _ = c.yyjson_mut_obj_add_bool(doc, watch, "watched", false);
+    if (srv.session_project[0] != 0 and !mcp.cEql(&srv.session_project, project)) {
+        _ = c.yyjson_mut_obj_add_str(doc, watch, "reason", "not_session_project");
+    } else if (srv.config != null and !c.cbm_config_get_bool(srv.config, c.CBM_CONFIG_AUTO_WATCH, true)) {
+        _ = c.yyjson_mut_obj_add_str(doc, watch, "reason", "auto_watch_off");
+    } else {
+        _ = c.yyjson_mut_obj_add_str(doc, watch, "reason", "not_registered");
+    }
+}
+
+pub fn handleIndexStatus(srv: *Server, args: CStr) HeapStr {
     const project = mcp.getProjectArg(args);
     var path: [1024]u8 = undefined;
     const repo = mcp.openRepository(&path, project) orelse return mcp.projectNotFoundResult(project);
@@ -558,6 +605,8 @@ pub fn handleIndexStatus(_: *Server, args: CStr) HeapStr {
     addCoverageSummary(doc, root, repo, workspace_id);
     c.cbm_zova_repository_close(repo);
     mcp.addGitContextJson(doc, root, info.root_path);
+    const resolved_project: CStr = if (info.name != null and info.name[0] != 0) info.name else project;
+    addWatchStatusJson(srv, doc, root, resolved_project);
     return mcp.docResult(doc);
 }
 
