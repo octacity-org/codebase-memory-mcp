@@ -95,6 +95,12 @@ const Pipeline = extern struct {
 
     saved_summary: c.cbm_project_summary_export_t,
     saved_summary_valid: bool,
+
+    /// Opt-in discovery size limits (0 or negative = disabled).
+    max_files: c_int,
+    max_source_mb: c_int,
+    discovered_files: c_int,
+    discovered_source_bytes: i64,
 };
 
 /// (int)x for a size_t, as C converts it.
@@ -252,6 +258,22 @@ pub export fn cbm_pipeline_cancelled_ptr(p: ?*Pipeline) ?*c_int {
 
 pub export fn cbm_pipeline_get_mode(p: ?*const Pipeline) c_int {
     return if (p) |pl| @intCast(pl.mode) else 0;
+}
+
+pub export fn cbm_pipeline_set_max_files(p: ?*Pipeline, max_files: c_int) void {
+    if (p) |pl| pl.max_files = max_files;
+}
+
+pub export fn cbm_pipeline_set_max_source_mb(p: ?*Pipeline, max_source_mb: c_int) void {
+    if (p) |pl| pl.max_source_mb = max_source_mb;
+}
+
+pub export fn cbm_pipeline_get_discovered_files(p: ?*const Pipeline) c_int {
+    return if (p) |pl| pl.discovered_files else 0;
+}
+
+pub export fn cbm_pipeline_get_discovered_source_bytes(p: ?*const Pipeline) i64 {
+    return if (p) |pl| pl.discovered_source_bytes else 0;
 }
 
 pub export fn cbm_pipeline_get_excluded(p: ?*const Pipeline, out: ?*[*c]MutStr, count: ?*c_int) void {
@@ -1656,6 +1678,8 @@ pub export fn cbm_pipeline_run(p_c: ?*Pipeline) c_int {
     const p = p_c orelse return c.CBM_NOT_FOUND;
     p.last_route = c.CBM_PIPELINE_ROUTE_UNKNOWN;
     p.format_migration = false;
+    p.discovered_files = 0;
+    p.discovered_source_bytes = 0;
 
     const t_pipeline_total = util.profStart();
     var t0: Timespec = undefined;
@@ -1701,6 +1725,44 @@ pub export fn cbm_pipeline_run(p_c: ?*Pipeline) c_int {
     if (rc != 0 or cancelled(p)) {
         rc = c.CBM_NOT_FOUND;
     } else {
+        p.discovered_files = file_count;
+        var total_bytes: i64 = 0;
+        if (files != null and file_count > 0) {
+            for (files[0..@intCast(file_count)]) |f| {
+                if (f.size > 0) total_bytes += f.size;
+            }
+        }
+        p.discovered_source_bytes = total_bytes;
+
+        if (p.max_files > 0 and file_count > p.max_files) {
+            interop.logWarn("pipeline.abort", .{
+                "reason", "max_files_exceeded",
+                "files",  itoa(file_count),
+                "limit",  itoa(p.max_files),
+            });
+            c.cbm_discover_free(files, file_count);
+            c.cbm_set_user_lang_config(null);
+            c.cbm_userconfig_free(p.userconfig);
+            p.userconfig = null;
+            return c.CBM_PIPELINE_ABORT_MAX_FILES;
+        }
+        if (p.max_source_mb > 0) {
+            const limit_bytes: i64 = @as(i64, p.max_source_mb) * BYTES_PER_MB;
+            if (total_bytes > limit_bytes) {
+                const mb_int: c_int = @intCast(@min(@divTrunc(total_bytes, BYTES_PER_MB), std.math.maxInt(c_int)));
+                interop.logWarn("pipeline.abort", .{
+                    "reason",    "max_source_mb_exceeded",
+                    "source_mb", itoa(mb_int),
+                    "limit_mb",  itoa(p.max_source_mb),
+                });
+                c.cbm_discover_free(files, file_count);
+                c.cbm_set_user_lang_config(null);
+                c.cbm_userconfig_free(p.userconfig);
+                p.userconfig = null;
+                return c.CBM_PIPELINE_ABORT_MAX_SOURCE_MB;
+            }
+        }
+
         // Check for existing DB → try incremental or delete for reindex
         rc = tryIncremental(p, files, file_count);
         if (rc == PIPELINE_INCREMENTAL_FATAL) {

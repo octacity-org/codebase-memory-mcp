@@ -498,6 +498,15 @@ fn runCli(argc_in: c_int, argv: Argv) c_int {
     }
     defer c.cbm_mcp_server_free(srv);
 
+    var config_dir: [c.CBM_SZ_1K]u8 = undefined;
+    var runtime_config: ?*c.cbm_config_t = null;
+    if (c.cbm_get_home_dir() != null) {
+        _ = interop.bprint(&config_dir, "{s}", .{interop.sp(c.cbm_resolve_cache_dir())});
+        runtime_config = c.cbm_config_open(&config_dir);
+    }
+    defer c.cbm_config_close(runtime_config);
+    c.cbm_mcp_server_set_config(srv, runtime_config);
+
     const result = c.cbm_mcp_handle_tool(srv, tool_name, args_json);
     var exit_code: c_int = 0;
 

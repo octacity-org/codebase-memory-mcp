@@ -64,7 +64,21 @@ void cbm_pipeline_free(cbm_pipeline_t *p);
  * written and the previous generation still serves (upstream #1997 #832).
  * Distinct from the cancel sentinel so callers can name the cause. */
 #define CBM_PIPELINE_ABORT_OVER_BUDGET (-5)
+/* Discovery exceeded an opt-in size limit (index_max_files or
+ * index_max_source_mb): the run stops before extraction, nothing is published,
+ * and the previous generation still serves. */
+#define CBM_PIPELINE_ABORT_MAX_FILES (-6)
+#define CBM_PIPELINE_ABORT_MAX_SOURCE_MB (-7)
 int cbm_pipeline_run(cbm_pipeline_t *p);
+
+/* Set opt-in discovery size limits (0 or negative = disabled, default). */
+void cbm_pipeline_set_max_files(cbm_pipeline_t *p, int max_files);
+void cbm_pipeline_set_max_source_mb(cbm_pipeline_t *p, int max_source_mb);
+
+/* Observed discovery totals from the most recent cbm_pipeline_run()
+ * (0 when discovery did not run). */
+int cbm_pipeline_get_discovered_files(const cbm_pipeline_t *p);
+int64_t cbm_pipeline_get_discovered_source_bytes(const cbm_pipeline_t *p);
 
 /* Request cancellation of a running pipeline (thread-safe). */
 void cbm_pipeline_cancel(cbm_pipeline_t *p);

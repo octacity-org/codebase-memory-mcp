@@ -444,6 +444,8 @@ const config_keys = [_]ConfigKey{
     .{ .key = c.CBM_CONFIG_AUTO_INDEX, .default_value = "false", .help = "Enable auto-indexing on MCP session start" },
     .{ .key = c.CBM_CONFIG_AUTO_INDEX_LIMIT, .default_value = "50000", .help = "Max files for auto-indexing new projects" },
     .{ .key = c.CBM_CONFIG_AUTO_WATCH, .default_value = "true", .help = "Register background git watcher on session connect" },
+    .{ .key = c.CBM_CONFIG_INDEX_MAX_FILES, .default_value = "0", .help = "Max discovered files for index_repository (0 = unlimited)" },
+    .{ .key = c.CBM_CONFIG_INDEX_MAX_SOURCE_MB, .default_value = "0", .help = "Max discovered source size in MiB for index_repository (0 = unlimited)" },
 };
 
 fn configKeyLookup(key: CStr) ?*const ConfigKey {

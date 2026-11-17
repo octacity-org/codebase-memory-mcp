@@ -80,6 +80,8 @@ Current keys:
 |---|---|---|
 | `auto_index` | `false` | Automatically index new projects when an MCP session starts. |
 | `auto_index_limit` | `50000` | Maximum file count allowed for automatic indexing of a new project. |
+| `index_max_files` | `0` | Opt-in maximum discovered file count for `index_repository` (`0` = unlimited). |
+| `index_max_source_mb` | `0` | Opt-in maximum discovered source size in MiB for `index_repository` (`0` = unlimited). |
 
 ## 3. Environment Variables
 
