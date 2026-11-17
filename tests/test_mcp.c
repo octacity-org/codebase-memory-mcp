@@ -3882,6 +3882,184 @@ TEST(index_repository_over_budget_reports_named_reason) {
 #endif
 }
 
+static bool write_py_files(const char *repo, int count, size_t min_bytes_first) {
+    for (int i = 0; i < count; i++) {
+        char path[640];
+        snprintf(path, sizeof(path), "%s/mod_%d.py", repo, i);
+        FILE *f = fopen(path, "w");
+        if (!f) {
+            return false;
+        }
+        fprintf(f, "def fn_%d(x):\n    return x + %d\n", i, i);
+        if (i == 0 && min_bytes_first > 0) {
+            size_t written = 0;
+            while (written < min_bytes_first) {
+                fputs("# padding line for source size limit test\n", f);
+                written += 41;
+            }
+        }
+        fclose(f);
+    }
+    return true;
+}
+
+TEST(index_repository_max_files_aborts_and_preserves_previous_index) {
+#if !CBM_WITH_ZOVA
+    PASS();
+#else
+    char repo[512];
+    char cache[512];
+    snprintf(repo, sizeof(repo), "%s/cbm-mcp-maxfiles-repo-XXXXXX", cbm_tmpdir());
+    snprintf(cache, sizeof(cache), "%s/cbm-mcp-maxfiles-cache-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(repo));
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    bool files_ok = write_py_files(repo, 2, 0);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    char args[1024];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"name\":\"maxfiles\"}", repo);
+
+    /* Default (off): 2 files index cleanly. */
+    char *first = srv && files_ok ? cbm_mcp_handle_tool(srv, "index_repository", args) : NULL;
+    bool first_indexed = response_contains_json_fragment(first, "\"status\":\"indexed\"");
+    int nodes_first = budget_result_int(first, "nodes");
+    free(first);
+
+    /* Enable index_max_files=2 and add 2 more files -> aborts before extraction. */
+    files_ok = files_ok && write_py_files(repo, 4, 0);
+    cbm_config_t *cfg = cbm_config_open(cache);
+    if (cfg) {
+        cbm_config_set(cfg, CBM_CONFIG_INDEX_MAX_FILES, "2");
+        if (srv) {
+            cbm_mcp_server_set_config(srv, cfg);
+        }
+    }
+    char *second = srv && cfg && files_ok ? cbm_mcp_handle_tool(srv, "index_repository", args) : NULL;
+    bool aborted = response_contains_json_fragment(second, "\"status\":\"error\"") &&
+                   response_contains_json_fragment(second, "\"reason\":\"max_files_exceeded\"") &&
+                   response_contains_json_fragment(second, "\"previous_index\":\"preserved\"") &&
+                   second && strstr(second, "index_max_files") != NULL;
+    int limit_val = budget_result_int(second, "index_max_files");
+    int observed_val = budget_result_int(second, "discovered_files");
+    free(second);
+
+    /* Previous generation still serves. */
+    char *status =
+        srv ? cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"maxfiles\"}") : NULL;
+    int nodes_after = budget_result_int(status, "nodes");
+    free(status);
+
+    if (srv) {
+        cbm_mcp_server_set_config(srv, NULL);
+        cbm_mcp_server_free(srv);
+    }
+    if (cfg) {
+        cbm_config_close(cfg);
+    }
+    if (saved_cache_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    free(saved_cache_copy);
+    th_rmtree(repo);
+    th_rmtree(cache);
+
+    ASSERT_NOT_NULL(srv);
+    ASSERT_NOT_NULL(cfg);
+    ASSERT_TRUE(files_ok);
+    ASSERT_TRUE(first_indexed);
+    ASSERT_GT(nodes_first, 0);
+    ASSERT_TRUE(aborted);
+    ASSERT_EQ(limit_val, 2);
+    ASSERT_TRUE(observed_val >= 4);
+    ASSERT_EQ(nodes_after, nodes_first);
+    PASS();
+#endif
+}
+
+TEST(index_repository_max_source_mb_aborts_and_preserves_previous_index) {
+#if !CBM_WITH_ZOVA
+    PASS();
+#else
+    char repo[512];
+    char cache[512];
+    snprintf(repo, sizeof(repo), "%s/cbm-mcp-maxmb-repo-XXXXXX", cbm_tmpdir());
+    snprintf(cache, sizeof(cache), "%s/cbm-mcp-maxmb-cache-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(repo));
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    bool files_ok = write_py_files(repo, 1, 0);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    char args[1024];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"name\":\"maxmb\"}", repo);
+
+    /* Default (off): small file indexes cleanly. */
+    char *first = srv && files_ok ? cbm_mcp_handle_tool(srv, "index_repository", args) : NULL;
+    bool first_indexed = response_contains_json_fragment(first, "\"status\":\"indexed\"");
+    int nodes_first = budget_result_int(first, "nodes");
+    free(first);
+
+    /* Enable index_max_source_mb=1 and write >1 MiB source -> aborts before extraction. */
+    files_ok = files_ok && write_py_files(repo, 1, 1200000);
+    cbm_config_t *cfg = cbm_config_open(cache);
+    if (cfg) {
+        cbm_config_set(cfg, CBM_CONFIG_INDEX_MAX_SOURCE_MB, "1");
+        if (srv) {
+            cbm_mcp_server_set_config(srv, cfg);
+        }
+    }
+    char *second = srv && cfg && files_ok ? cbm_mcp_handle_tool(srv, "index_repository", args) : NULL;
+    bool aborted = response_contains_json_fragment(second, "\"status\":\"error\"") &&
+                   response_contains_json_fragment(second, "\"reason\":\"max_source_mb_exceeded\"") &&
+                   response_contains_json_fragment(second, "\"previous_index\":\"preserved\"") &&
+                   second && strstr(second, "index_max_source_mb") != NULL;
+    int limit_val = budget_result_int(second, "index_max_source_mb");
+    int observed_mb = budget_result_int(second, "discovered_source_mb");
+    int observed_bytes = budget_result_int(second, "discovered_source_bytes");
+    free(second);
+
+    /* Previous generation still serves. */
+    char *status = srv ? cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"maxmb\"}") : NULL;
+    int nodes_after = budget_result_int(status, "nodes");
+    free(status);
+
+    if (srv) {
+        cbm_mcp_server_set_config(srv, NULL);
+        cbm_mcp_server_free(srv);
+    }
+    if (cfg) {
+        cbm_config_close(cfg);
+    }
+    if (saved_cache_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    free(saved_cache_copy);
+    th_rmtree(repo);
+    th_rmtree(cache);
+
+    ASSERT_NOT_NULL(srv);
+    ASSERT_NOT_NULL(cfg);
+    ASSERT_TRUE(files_ok);
+    ASSERT_TRUE(first_indexed);
+    ASSERT_GT(nodes_first, 0);
+    ASSERT_TRUE(aborted);
+    ASSERT_EQ(limit_val, 1);
+    ASSERT_TRUE(observed_mb >= 2);
+    ASSERT_TRUE(observed_bytes > 1048576);
+    ASSERT_EQ(nodes_after, nodes_first);
+    PASS();
+#endif
+}
+
 /* Upstream 7a1e069b: the scoped scan must not depend on GNU grep's --include
  * (BusyBox grep in the static Alpine/musl runtime has none). A fake grep that
  * rejects --include stands in for BusyBox; file_pattern is applied in C. */
@@ -7214,6 +7392,8 @@ SUITE(mcp) {
     RUN_TEST(search_code_scoped_file_pattern_is_busybox_portable);
     RUN_TEST(store_list_files_prefers_canonical_file_nodes);
     RUN_TEST(index_repository_over_budget_reports_named_reason);
+    RUN_TEST(index_repository_max_files_aborts_and_preserves_previous_index);
+    RUN_TEST(index_repository_max_source_mb_aborts_and_preserves_previous_index);
     RUN_TEST(index_supervised_over_budget_passes_worker_response);
     RUN_TEST(search_code_path_filter_prefilter_keeps_matches);
     RUN_TEST(search_code_path_filter_matches_nothing);

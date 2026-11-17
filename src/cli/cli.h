@@ -327,6 +327,8 @@ int cbm_config_delete(cbm_config_t *cfg, const char *key);
 #define CBM_CONFIG_AUTO_INDEX "auto_index"
 #define CBM_CONFIG_AUTO_INDEX_LIMIT "auto_index_limit"
 #define CBM_CONFIG_AUTO_WATCH "auto_watch"
+#define CBM_CONFIG_INDEX_MAX_FILES "index_max_files"
+#define CBM_CONFIG_INDEX_MAX_SOURCE_MB "index_max_source_mb"
 
 /* ── Subcommands (wired from main.zig) ─────────────────────────── */
 

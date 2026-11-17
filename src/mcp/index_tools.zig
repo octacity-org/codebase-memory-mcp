@@ -666,6 +666,11 @@ fn indexRepositoryRun(srv: *Server, args: CStr) HeapStr {
         return textResult("invalid project name", true);
     }
 
+    const max_files: c_int = if (srv.config != null) c.cbm_config_get_int(srv.config, c.CBM_CONFIG_INDEX_MAX_FILES, 0) else 0;
+    const max_source_mb: c_int = if (srv.config != null) c.cbm_config_get_int(srv.config, c.CBM_CONFIG_INDEX_MAX_SOURCE_MB, 0) else 0;
+    if (max_files > 0) c.cbm_pipeline_set_max_files(p, max_files);
+    if (max_source_mb > 0) c.cbm_pipeline_set_max_source_mb(p, max_source_mb);
+
     const project_name = mcp.dup(c.cbm_pipeline_project_name(p));
     defer c.free(project_name);
 
@@ -739,6 +744,45 @@ fn indexRepositoryRun(srv: *Server, args: CStr) HeapStr {
                 "published and the previous index still serves. Raise " ++
                 "CBM_MEM_BUDGET_MB, lower CBM_WORKERS, or exclude large " ++
                 "subtrees.");
+    } else if (rc == c.CBM_PIPELINE_ABORT_MAX_FILES) {
+        const discovered_files = c.cbm_pipeline_get_discovered_files(p);
+        var files_text: [32]u8 = undefined;
+        var limit_text: [32]u8 = undefined;
+        var hint_buf: [512]u8 = undefined;
+        interop.log(c.CBM_LOG_ERROR, "index.abort", .{
+            "reason",           "max_files_exceeded",
+            "project",          @as(CStr, project_name),
+            "discovered_files", @as(CStr, mcp.fmtZ(&files_text, "{d}", .{discovered_files})),
+            "index_max_files",  @as(CStr, mcp.fmtZ(&limit_text, "{d}", .{max_files})),
+        });
+        _ = c.yyjson_mut_obj_add_str(doc, root, "status", "error");
+        _ = c.yyjson_mut_obj_add_str(doc, root, "reason", "max_files_exceeded");
+        _ = c.yyjson_mut_obj_add_str(doc, root, "previous_index", "preserved");
+        _ = c.yyjson_mut_obj_add_int(doc, root, "index_max_files", max_files);
+        _ = c.yyjson_mut_obj_add_int(doc, root, "discovered_files", discovered_files);
+        const hint = mcp.fmtZ(&hint_buf, "Indexing stopped: discovered {d} files, which exceeds index_max_files ({d}); no partial graph was published and the previous index still serves. Raise index_max_files or exclude large subtrees.", .{ discovered_files, max_files });
+        _ = c.yyjson_mut_obj_add_strcpy(doc, root, "hint", hint);
+    } else if (rc == c.CBM_PIPELINE_ABORT_MAX_SOURCE_MB) {
+        const mib: i64 = 1024 * 1024;
+        const discovered_bytes = c.cbm_pipeline_get_discovered_source_bytes(p);
+        const discovered_mb: i64 = @divTrunc(discovered_bytes + mib - 1, mib);
+        var mb_text: [32]u8 = undefined;
+        var limit_text: [32]u8 = undefined;
+        var hint_buf: [512]u8 = undefined;
+        interop.log(c.CBM_LOG_ERROR, "index.abort", .{
+            "reason",               "max_source_mb_exceeded",
+            "project",              @as(CStr, project_name),
+            "discovered_source_mb", @as(CStr, mcp.fmtZ(&mb_text, "{d}", .{discovered_mb})),
+            "index_max_source_mb",  @as(CStr, mcp.fmtZ(&limit_text, "{d}", .{max_source_mb})),
+        });
+        _ = c.yyjson_mut_obj_add_str(doc, root, "status", "error");
+        _ = c.yyjson_mut_obj_add_str(doc, root, "reason", "max_source_mb_exceeded");
+        _ = c.yyjson_mut_obj_add_str(doc, root, "previous_index", "preserved");
+        _ = c.yyjson_mut_obj_add_int(doc, root, "index_max_source_mb", max_source_mb);
+        _ = c.yyjson_mut_obj_add_int(doc, root, "discovered_source_mb", discovered_mb);
+        _ = c.yyjson_mut_obj_add_int(doc, root, "discovered_source_bytes", discovered_bytes);
+        const hint = mcp.fmtZ(&hint_buf, "Indexing stopped: discovered {d} MiB ({d} bytes) of source, which exceeds index_max_source_mb ({d} MiB); no partial graph was published and the previous index still serves. Raise index_max_source_mb or exclude large subtrees.", .{ discovered_mb, discovered_bytes, max_source_mb });
+        _ = c.yyjson_mut_obj_add_strcpy(doc, root, "hint", hint);
     } else {
         _ = c.yyjson_mut_obj_add_str(doc, root, "status", "error");
         _ = c.yyjson_mut_obj_add_str(doc, root, "hint", "Pipeline failed. Check repo_path exists and contains source files. " ++
