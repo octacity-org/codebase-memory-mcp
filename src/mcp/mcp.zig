@@ -560,7 +560,7 @@ const tools = [_]ToolDef{
         .description = "Detect code changes and their impact",
         .input_schema = "{\"type\":\"object\",\"properties\":{\"project\":{\"type\":\"string\"},\"scope\":{\"type\":" ++
             "\"string\"},\"depth\":{\"type\":\"integer\",\"default\":2},\"base_branch\":{\"type\":" ++
-            "\"string\",\"default\":\"main\"},\"since\":{\"type\":\"string\",\"description\":" ++
+            "\"string\",\"description\":\"Default: origin/HEAD, else main, else master, else the upstream.\"},\"since\":{\"type\":\"string\",\"description\":" ++
             "\"Git ref or tag to compare from (e.g. HEAD~5, v0.5.0). Diffs <ref>...HEAD.\"}}," ++
             "\"required\":" ++
             "[\"project\"]}",
