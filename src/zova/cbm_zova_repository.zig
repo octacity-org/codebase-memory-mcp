@@ -845,7 +845,7 @@ pub export fn cbm_zova_catalog_resolve(maybe_catalog: ?*Catalog, selectors: ?[*]
     return rc;
 }
 
-/// "WITH scope(workspace_key,selector) AS (VALUES (?3,?4),(?5,?6)…) " for the
+/// "WITH scope(workspace_key,selector) AS (VALUES (?5,?6),(?7,?8)…) " for the
 /// projects of `scope`, malloc'd. `next_bind` receives the first parameter
 /// index after the scope's.
 fn catalogScopeCte(scope: *const Scope, next_bind: *c_int) ?[*:0]u8 {
@@ -853,7 +853,7 @@ fn catalogScopeCte(scope: *const Scope, next_bind: *c_int) ?[*:0]u8 {
     const capacity = 64 + @as(usize, @intCast(scope.count)) * 32;
     const sql = (@as(?[*]u8, interop.mallocN(u8, capacity)) orelse return null)[0..capacity];
     var used = interop.bprint(sql, "WITH scope(workspace_key,selector) AS (VALUES ", .{});
-    var bind: c_int = 3;
+    var bind: c_int = 5;
     for (0..@intCast(scope.count)) |i| {
         const separator: []const u8 = if (i != 0) "," else "";
         const written = interop.bprint(sql[used..], "{s}(?{d},?{d})", .{ separator, bind, bind + 1 });
@@ -873,15 +873,19 @@ fn catalogScopeCte(scope: *const Scope, next_bind: *c_int) ?[*:0]u8 {
     return @ptrCast(sql.ptr);
 }
 
-/// Binds ?1 (query), ?2 (file pattern or NULL) and the scope's pairs.
-fn catalogBindFtsScope(statement: ?*Stmt, scope: *const Scope, query: Str, file_pattern: ?Str) bool {
+/// Binds `value` at `index`, or NULL when it is absent or empty.
+fn repoBindOptionalText(statement: ?*Stmt, index: c_int, value: ?Str) bool {
+    return if (nonEmpty(value)) |text| repoBindText(statement, index, text) else repoBindNull(statement, index);
+}
+
+/// Binds ?1 (query), ?2 (file pattern or NULL), ?3 (label or NULL), ?4
+/// (exact name or NULL) and the scope's pairs.
+fn catalogBindFtsScope(statement: ?*Stmt, scope: *const Scope, query: Str, filter: FtsFilter) bool {
     if (!repoBindText(statement, 1, query)) return false;
-    const pattern_bound = if (nonEmpty(file_pattern)) |pattern|
-        repoBindText(statement, 2, pattern)
-    else
-        repoBindNull(statement, 2);
-    if (!pattern_bound) return false;
-    var bind: c_int = 3;
+    if (!repoBindOptionalText(statement, 2, filter.file_pattern) or
+        !repoBindOptionalText(statement, 3, filter.label) or
+        !repoBindOptionalText(statement, 4, filter.exact_name)) return false;
+    var bind: c_int = 5;
     for (many(scope.projects, scope.count)) |*project| {
         if (!repoBindI64(statement, bind, project.workspace_key) or
             !repoBindText(statement, bind + 1, project.selector)) return false;
@@ -889,6 +893,15 @@ fn catalogBindFtsScope(statement: ?*Stmt, scope: *const Scope, query: Str, file_
     }
     return true;
 }
+
+/// What narrows and orders a full-text search besides the match expression:
+/// a file path glob, a node label, and the name whose exact (case-insensitive)
+/// matches rank first. Each may be absent.
+const FtsFilter = struct {
+    file_pattern: ?Str,
+    label: ?Str,
+    exact_name: ?Str,
+};
 
 /// malloc'd "<cte><tail>" plus `extra` spare bytes; NULL on OOM.
 fn catalogSql(cte: Str, tail: []const u8, extra: usize) ?[]u8 {
@@ -899,7 +912,7 @@ fn catalogSql(cte: Str, tail: []const u8, extra: usize) ?[]u8 {
 }
 
 /// The number of FTS matches in the scope, before paging.
-fn catalogFtsTotal(catalog: *Catalog, scope: *const Scope, cte: Str, query: Str, file_pattern: ?Str) ?i64 {
+fn catalogFtsTotal(catalog: *Catalog, scope: *const Scope, cte: Str, query: Str, filter: FtsFilter) ?i64 {
     const count_tail =
         "SELECT count(*) FROM scope sc JOIN cbm_nodes_v1 n " ++
         "ON n.workspace_key=sc.workspace_key " ++
@@ -907,12 +920,13 @@ fn catalogFtsTotal(catalog: *Catalog, scope: *const Scope, cte: Str, query: Str,
         "JOIN cbm_files_v1 p ON p.file_key=n.file_key " ++
         "WHERE cbm_nodes_fts_v1 MATCH ?1 " ++
         "AND n.label NOT IN ('File','Folder','Module','Section','Variable','Project') " ++
-        "AND (?2 IS NULL OR p.file_path GLOB ?2)";
+        "AND (?2 IS NULL OR p.file_path GLOB ?2) " ++
+        "AND (?3 IS NULL OR n.label=?3)";
     const count_sql = catalogSql(cte, count_tail, 0) orelse return null;
     defer c.free(count_sql.ptr);
     const statement = repoPrepare(catalog.db, @ptrCast(count_sql.ptr)) orelse return null;
     defer repoFinalize(statement);
-    if (!catalogBindFtsScope(statement, scope, query, file_pattern)) return null;
+    if (!catalogBindFtsScope(statement, scope, query, filter)) return null;
     var step: c.zova_step_result = c.ZOVA_STEP_DONE;
     if (!repoStep(statement, &step) or step != c.ZOVA_STEP_ROW) return null;
     return repoColumnI64(statement, 0);
@@ -927,19 +941,21 @@ const FtsRows = struct {
 };
 
 /// Runs the paged FTS query and collects its rows.
-fn catalogFtsReadRows(catalog: *Catalog, scope: *const Scope, cte: Str, next_bind: c_int, query: Str, file_pattern: ?Str, limit: c_int, offset: c_int, rows: *FtsRows) Error!void {
+fn catalogFtsReadRows(catalog: *Catalog, scope: *const Scope, cte: Str, next_bind: c_int, query: Str, filter: FtsFilter, limit: c_int, offset: c_int, rows: *FtsRows) Error!void {
     const data_tail =
         "SELECT n.workspace_key,n.zova_node_key,sc.selector,n.label,n.name," ++
         "n.qualified_name,p.file_path,n.start_line,n.end_line,n.properties," ++
         "(bm25(cbm_nodes_fts_v1)-CASE WHEN n.label IN ('Function','Method') THEN 10.0 " ++
         "WHEN n.label='Route' THEN 8.0 WHEN n.label IN " ++
-        "('Class','Interface','Type','Enum') THEN 5.0 ELSE 0.0 END) AS rank " ++
+        "('Class','Interface','Type','Enum') THEN 5.0 ELSE 0.0 END" ++
+        "-CASE WHEN ?4 IS NOT NULL AND n.name=?4 COLLATE NOCASE THEN 20.0 ELSE 0.0 END) AS rank " ++
         "FROM scope sc JOIN cbm_nodes_v1 n ON n.workspace_key=sc.workspace_key " ++
         "JOIN cbm_nodes_fts_v1 f ON f.rowid=n.zova_node_key " ++
         "JOIN cbm_files_v1 p ON p.file_key=n.file_key " ++
         "WHERE cbm_nodes_fts_v1 MATCH ?1 " ++
         "AND n.label NOT IN ('File','Folder','Module','Section','Variable','Project') " ++
         "AND (?2 IS NULL OR p.file_path GLOB ?2) " ++
+        "AND (?3 IS NULL OR n.label=?3) " ++
         "ORDER BY rank,sc.selector,n.qualified_name,n.zova_node_key ";
     const statement = prepared: {
         const data_sql = catalogSql(cte, data_tail, 79) orelse return error.Failed;
@@ -949,7 +965,7 @@ fn catalogFtsReadRows(catalog: *Catalog, scope: *const Scope, cte: Str, next_bin
         break :prepared repoPrepare(catalog.db, @ptrCast(data_sql.ptr)) orelse return error.Failed;
     };
     defer repoFinalize(statement);
-    if (!catalogBindFtsScope(statement, scope, query, file_pattern) or
+    if (!catalogBindFtsScope(statement, scope, query, filter) or
         !repoBindI64(statement, next_bind, limit) or
         !repoBindI64(statement, next_bind + 1, offset)) return error.Failed;
 
@@ -1036,7 +1052,7 @@ fn catalogFtsApplyNative(catalog: *Catalog, scope: *const Scope, rows: *FtsRows)
     }
 }
 
-pub export fn cbm_zova_catalog_search_fts(maybe_catalog: ?*Catalog, maybe_scope: ?*const Scope, maybe_query: ?Str, file_pattern: ?Str, limit_arg: c_int, offset: c_int, maybe_out: ?*SearchOutput) c_int {
+pub export fn cbm_zova_catalog_search_fts(maybe_catalog: ?*Catalog, maybe_scope: ?*const Scope, maybe_query: ?Str, file_pattern: ?Str, label: ?Str, exact_name: ?Str, limit_arg: c_int, offset: c_int, maybe_out: ?*SearchOutput) c_int {
     if (!with_zova) {
         if (maybe_out) |out| out.* = std.mem.zeroes(SearchOutput);
         return ERR;
@@ -1052,7 +1068,8 @@ pub export fn cbm_zova_catalog_search_fts(maybe_catalog: ?*Catalog, maybe_scope:
     var next_bind: c_int = 0;
     const cte = catalogScopeCte(scope, &next_bind) orelse return ERR;
     defer c.free(cte);
-    const total = catalogFtsTotal(catalog, scope, cte, query, file_pattern) orelse return ERR;
+    const filter = FtsFilter{ .file_pattern = file_pattern, .label = label, .exact_name = exact_name };
+    const total = catalogFtsTotal(catalog, scope, cte, query, filter) orelse return ERR;
     if (total < 0 or total > INT_MAX) return ERR;
 
     var rows = FtsRows{};
@@ -1061,7 +1078,7 @@ pub export fn cbm_zova_catalog_search_fts(maybe_catalog: ?*Catalog, maybe_scope:
         c.free(rows.workspace_keys);
     }
     read: {
-        catalogFtsReadRows(catalog, scope, cte, next_bind, query, file_pattern, limit, offset, &rows) catch break :read;
+        catalogFtsReadRows(catalog, scope, cte, next_bind, query, filter, limit, offset, &rows) catch break :read;
         catalogFtsApplyNative(catalog, scope, &rows) catch break :read;
         out.results = rows.results;
         out.count = rows.count;
@@ -2382,27 +2399,28 @@ fn repoReadSearchRows(repo: *const Repository, statement: ?*Stmt, initial_capaci
     }
 }
 
-fn repoSearchFtsRead(repo: *Repository, query: Str, file_pattern: ?Str, limit: c_int, offset: c_int, rows: *SearchRows) Error!void {
+fn repoSearchFtsRead(repo: *Repository, query: Str, filter: FtsFilter, limit: c_int, offset: c_int, rows: *SearchRows) Error!void {
     {
         const sql = "SELECT n.zova_node_key,n.label,n.name,n.qualified_name,p.file_path," ++
             "n.start_line,n.end_line,n.properties,(bm25(cbm_nodes_fts_v1)-CASE " ++
             "WHEN n.label IN ('Function','Method') THEN 10.0 WHEN n.label='Route' THEN 8.0 " ++
-            "WHEN n.label IN ('Class','Interface','Type','Enum') THEN 5.0 ELSE 0.0 END) AS rank " ++
+            "WHEN n.label IN ('Class','Interface','Type','Enum') THEN 5.0 ELSE 0.0 END" ++
+            "-CASE WHEN ?7 IS NOT NULL AND n.name=?7 COLLATE NOCASE THEN 20.0 ELSE 0.0 END) AS rank " ++
             "FROM cbm_nodes_fts_v1 f " ++
             "JOIN cbm_nodes_v1 n ON n.zova_node_key=f.rowid " ++
             "JOIN cbm_files_v1 p ON p.file_key=n.file_key " ++
             "WHERE n.workspace_key=?1 AND cbm_nodes_fts_v1 MATCH ?2 " ++
             "AND n.label NOT IN ('File','Folder','Module','Section','Variable','Project') " ++
             "AND (?3 IS NULL OR p.file_path GLOB ?3) " ++
+            "AND (?6 IS NULL OR n.label=?6) " ++
             "ORDER BY rank,n.qualified_name,n.zova_node_key LIMIT ?4 OFFSET ?5";
         const statement = repoPrepare(repo.db, sql) orelse return error.Failed;
         defer repoFinalize(statement);
         if (!repoBindI64(statement, 1, repo.workspace_key) or !repoBindText(statement, 2, query)) return error.Failed;
-        const pattern_bound = if (nonEmpty(file_pattern)) |pattern|
-            repoBindText(statement, 3, pattern)
-        else
-            repoBindNull(statement, 3);
-        if (!pattern_bound or !repoBindI64(statement, 4, limit) or !repoBindI64(statement, 5, offset)) return error.Failed;
+        if (!repoBindOptionalText(statement, 3, filter.file_pattern) or
+            !repoBindI64(statement, 4, limit) or !repoBindI64(statement, 5, offset) or
+            !repoBindOptionalText(statement, 6, filter.label) or
+            !repoBindOptionalText(statement, 7, filter.exact_name)) return error.Failed;
         try repoReadSearchRows(repo, statement, 8, 8, rows);
     }
     const count: usize = @intCast(rows.count);
@@ -2417,7 +2435,7 @@ fn repoSearchFtsRead(repo: *Repository, query: Str, file_pattern: ?Str, limit: c
     }
 }
 
-pub export fn cbm_zova_repository_search_fts(maybe_repo: ?*Repository, workspace_id: ?Str, maybe_query: ?Str, file_pattern: ?Str, limit: c_int, offset: c_int, maybe_out: ?*SearchOutput) c_int {
+pub export fn cbm_zova_repository_search_fts(maybe_repo: ?*Repository, workspace_id: ?Str, maybe_query: ?Str, file_pattern: ?Str, label: ?Str, exact_name: ?Str, limit: c_int, offset: c_int, maybe_out: ?*SearchOutput) c_int {
     if (!with_zova) return ERR;
     const repo = repoWorkspaceRequired(maybe_repo, workspace_id) orelse return ERR;
     const query = nonEmpty(maybe_query) orelse return ERR;
@@ -2425,7 +2443,8 @@ pub export fn cbm_zova_repository_search_fts(maybe_repo: ?*Repository, workspace
     out.* = std.mem.zeroes(SearchOutput);
     var rows = SearchRows{};
     defer c.free(rows.keys);
-    repoSearchFtsRead(repo, query, file_pattern, if (limit <= 0) 10 else limit, offset, &rows) catch {
+    const filter = FtsFilter{ .file_pattern = file_pattern, .label = label, .exact_name = exact_name };
+    repoSearchFtsRead(repo, query, filter, if (limit <= 0) 10 else limit, offset, &rows) catch {
         rows.freeResults();
         return ERR;
     };

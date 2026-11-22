@@ -106,7 +106,7 @@ static int operations_repository_inventory(const char *path, const char *project
                                                       &indexed_at) == CBM_STORE_OK &&
                      cbm_zova_repository_counts(repo, workspace_id, &nodes, &edges) ==
                          CBM_STORE_OK &&
-                     cbm_zova_repository_search_fts(repo, workspace_id, "root", NULL, 10, 0,
+                     cbm_zova_repository_search_fts(repo, workspace_id, "root", NULL, NULL, NULL, 10, 0,
                                                     &fts) == CBM_STORE_OK &&
                      generation == expected_generation && nodes == expected_nodes &&
                      edges == expected_edges && fts.total == expected_nodes &&
@@ -548,7 +548,7 @@ static int operations_workspace_public_state_capture(
     cbm_zova_repository_t *repo = cbm_zova_repository_open(path, project);
     if (!repo) return -1;
     cbm_search_output_t fts = {0};
-    int rc = cbm_zova_repository_search_fts(repo, workspace_id, "alpha beta", NULL, 10, 0,
+    int rc = cbm_zova_repository_search_fts(repo, workspace_id, "alpha beta", NULL, NULL, NULL, 10, 0,
                                              &fts) == CBM_STORE_OK &&
                      fts.count == 1 && fts.results[0].node.qualified_name
                  ? 0 : -1;
@@ -627,7 +627,7 @@ static int operations_workspace_state_capture(const char *path, const char *work
     memset(out, 0, sizeof(*out));
     if (cbm_zova_repository_export_snapshot(path, workspace_id, &out->snapshot) != 0) return -1;
     cbm_zova_repository_t *repo = cbm_zova_repository_open(path, out->snapshot.project);
-    int rc = repo && cbm_zova_repository_search_fts(repo, workspace_id, "root", NULL, 20, 0,
+    int rc = repo && cbm_zova_repository_search_fts(repo, workspace_id, "root", NULL, NULL, NULL, 20, 0,
                                                     &out->fts) == CBM_STORE_OK ? 0 : -1;
     if (repo) cbm_zova_repository_close(repo);
     if (rc != 0) {
@@ -2635,7 +2635,7 @@ TEST(zova_operations_workspace_export_is_fresh_rich_and_single_workspace) {
     cbm_zova_repository_t *repo = cbm_zova_repository_open(data, "workspace-rich");
     ASSERT_NOT_NULL(repo);
     cbm_search_output_t fts = {0};
-    ASSERT_EQ(cbm_zova_repository_search_fts(repo, rich.workspace_id, "alpha beta", NULL, 10, 0,
+    ASSERT_EQ(cbm_zova_repository_search_fts(repo, rich.workspace_id, "alpha beta", NULL, NULL, NULL, 10, 0,
                                              &fts), CBM_STORE_OK);
     ASSERT_EQ(fts.count, 1);
     cbm_store_search_free(&fts);

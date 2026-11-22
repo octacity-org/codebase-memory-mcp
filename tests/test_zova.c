@@ -1556,7 +1556,7 @@ TEST(zova_catalog_assigns_stable_shortest_path_selectors) {
     ASSERT_STR_EQ(cbm_zova_repository_workspace_id(selected), scope.projects[1].workspace_id);
     cbm_zova_repository_close(selected);
     cbm_search_output_t search = {0};
-    ASSERT_EQ(cbm_zova_catalog_search_fts(catalog, &scope, "Client OR Service", NULL, 10, 0,
+    ASSERT_EQ(cbm_zova_catalog_search_fts(catalog, &scope, "Client OR Service", NULL, NULL, NULL, 10, 0,
                                           &search),
               CBM_STORE_OK);
     ASSERT_EQ(search.total, 2);

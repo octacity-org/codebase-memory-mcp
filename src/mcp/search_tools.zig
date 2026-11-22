@@ -819,9 +819,16 @@ pub fn handleSearchCode(srv: *Server, args: CStr) HeapStr {
 
     var path_regex_storage = std.mem.zeroes(c.cbm_regex_t);
     const path_filter = mcp.strArg(args, "path_filter");
-    const has_path_filter = path_filter != null and path_filter[0] != 0 and
-        c.cbm_regcomp(&path_regex_storage, path_filter, c.CBM_REG_EXTENDED | c.CBM_REG_NOSUB) == c.CBM_REG_OK;
-    c.free(path_filter);
+    defer c.free(path_filter);
+    const has_path_filter = path_filter != null and path_filter[0] != 0;
+    // An invalid path_filter must not be dropped: the search would then run
+    // unfiltered and return results the caller asked to exclude.
+    if (has_path_filter and
+        c.cbm_regcomp(&path_regex_storage, path_filter, c.CBM_REG_EXTENDED | c.CBM_REG_NOSUB) != c.CBM_REG_OK)
+    {
+        var message: [512]u8 = undefined;
+        return textResult(mcp.fmtZ(&message, "invalid path_filter regex '{s}': check for unbalanced (), [], or {{}}", .{sp(path_filter)}), true);
+    }
     defer if (has_path_filter) c.cbm_regfree(&path_regex_storage);
     const path_regex: ?*const c.cbm_regex_t = if (has_path_filter) &path_regex_storage else null;
 

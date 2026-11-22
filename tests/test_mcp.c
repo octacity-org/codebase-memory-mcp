@@ -2447,6 +2447,84 @@ TEST(tool_search_graph_query_honors_file_pattern_issue552) {
     PASS();
 }
 
+/* #144: a full-text query honors the label filter and ranks the node whose
+ * name is the query above nodes that merely repeat the token. Checked on the
+ * single-project route and on the multi-project (catalog) route. */
+TEST(tool_search_graph_query_honors_label_and_ranks_exact_name) {
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(st);
+
+    const char *proj = "issue-144";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, "/tmp/issue-144");
+
+    cbm_node_t definition = {0};
+    definition.project = proj;
+    definition.label = "Class";
+    definition.name = "Parser";
+    definition.qualified_name = "issue-144.src.parser.Parser";
+    definition.file_path = "src/parser.py";
+    definition.start_line = 1;
+    definition.end_line = 9;
+    ASSERT_GT(cbm_store_upsert_node(st, &definition), 0);
+
+    const char *test_qns[] = {"issue-144.tests.test_parser.test_parser_parser",
+                              "issue-144.tests.test_parser.test_parser_parser_again"};
+    const char *test_names[] = {"test_parser_parser", "test_parser_parser_again"};
+    for (int i = 0; i < 2; i++) {
+        cbm_node_t method = {0};
+        method.project = proj;
+        method.label = "Method";
+        method.name = test_names[i];
+        method.qualified_name = test_qns[i];
+        method.file_path = "tests/test_parser.py";
+        method.start_line = 1 + i * 4;
+        method.end_line = 3 + i * 4;
+        ASSERT_GT(cbm_store_upsert_node(st, &method), 0);
+    }
+
+    cbm_store_exec(st, "INSERT INTO nodes_fts(nodes_fts) VALUES('delete-all');");
+    ASSERT_EQ(cbm_store_exec(st,
+                             "INSERT INTO nodes_fts(rowid, name, qualified_name, label, "
+                             "file_path) "
+                             "SELECT id, cbm_camel_split(name), qualified_name, label, file_path "
+                             "FROM nodes;"),
+              CBM_STORE_OK);
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(st, proj), 0);
+
+    const char *scopes[] = {"\"project\":\"issue-144\"", "\"projects\":[\"issue-144\"]"};
+    for (int i = 0; i < 2; i++) {
+        char args[256];
+        snprintf(args, sizeof(args), "{%s,\"query\":\"parser\",\"limit\":10}", scopes[i]);
+        char *ranked = cbm_mcp_handle_tool(srv, "search_graph", args);
+        ASSERT_NOT_NULL(ranked);
+        const char *exact = strstr(ranked, "\"name\":\"Parser\"");
+        const char *partial = strstr(ranked, "\"name\":\"test_parser_parser\"");
+        if (!exact || !partial || exact > partial) {
+            printf("    scope %d ranked: %.600s\n", i, ranked);
+        }
+        ASSERT_NOT_NULL(exact);
+        ASSERT_NOT_NULL(partial);
+        ASSERT_TRUE(exact < partial);
+        free(ranked);
+
+        snprintf(args, sizeof(args), "{%s,\"query\":\"parser\",\"label\":\"Method\",\"limit\":10}",
+                 scopes[i]);
+        char *filtered = cbm_mcp_handle_tool(srv, "search_graph", args);
+        ASSERT_NOT_NULL(filtered);
+        ASSERT_NOT_NULL(strstr(filtered, "\"name\":\"test_parser_parser\""));
+        ASSERT_NULL(strstr(filtered, "\"name\":\"Parser\""));
+        ASSERT_TRUE(response_contains_json_fragment(filtered, "\"total\":2"));
+        free(filtered);
+    }
+
+    cbm_mcp_server_free(srv);
+    PASS();
+}
+
 TEST(tool_query_graph_basic) {
     cbm_mcp_server_t *srv = setup_mcp_with_data();
 
@@ -4167,6 +4245,89 @@ TEST(index_repository_failure_names_reason_and_previous_index) {
 #endif
 }
 
+/* #129: a path at or inside an indexed root names the project that owns it,
+ * and re-indexing that root without a name re-indexes the same project. */
+TEST(project_path_resolves_to_owning_project) {
+#if !CBM_WITH_ZOVA
+    PASS();
+#else
+    char repo[512];
+    char cache[512];
+    snprintf(repo, sizeof(repo), "%s/cbm-mcp-owner-repo-XXXXXX", cbm_tmpdir());
+    snprintf(cache, sizeof(cache), "%s/cbm-mcp-owner-cache-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(repo));
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    bool files_ok = write_py_files(repo, 2, 0);
+    char nested[640];
+    snprintf(nested, sizeof(nested), "%s/pkg/inner", repo);
+    files_ok = files_ok && th_write_file(TH_PATH(nested, "deep.py"), "def deep():\n    return 1\n") == 0;
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    char args[1024];
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"name\":\"owner-custom\"}", repo);
+    char *first = srv && files_ok ? cbm_mcp_handle_tool(srv, "index_repository", args) : NULL;
+    bool first_indexed = response_contains_json_fragment(first, "\"status\":\"indexed\"") &&
+                         response_contains_json_fragment(first, "\"project\":\"owner-custom\"");
+    free(first);
+
+    /* The root itself and a directory below it both name the custom-named
+     * project; a directory outside it does not. */
+    snprintf(args, sizeof(args), "{\"project\":\"%s\"}", repo);
+    char *by_root = srv ? cbm_mcp_handle_tool(srv, "index_status", args) : NULL;
+    int nodes_by_root = budget_result_int(by_root, "nodes");
+    free(by_root);
+    snprintf(args, sizeof(args), "{\"project\":\"%s\"}", nested);
+    char *by_nested = srv ? cbm_mcp_handle_tool(srv, "index_status", args) : NULL;
+    int nodes_by_nested = budget_result_int(by_nested, "nodes");
+    if (nodes_by_nested <= 0 && by_nested) {
+        printf("    nested lookup: %.400s\n", by_nested);
+    }
+    free(by_nested);
+    snprintf(args, sizeof(args), "{\"project\":\"%s\"}", cache);
+    char *by_other = srv ? cbm_mcp_handle_tool(srv, "index_status", args) : NULL;
+    int nodes_by_other = budget_result_int(by_other, "nodes");
+    free(by_other);
+
+    /* An unnamed re-index reuses the project that owns the root. */
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\"}", repo);
+    char *second = srv ? cbm_mcp_handle_tool(srv, "index_repository", args) : NULL;
+    bool reused = response_contains_json_fragment(second, "\"project\":\"owner-custom\"");
+    if (!reused && second) {
+        printf("    unnamed re-index: %.400s\n", second);
+    }
+    free(second);
+    char *listed = srv ? cbm_mcp_handle_tool(srv, "list_projects", "{}") : NULL;
+    int project_total = budget_result_int(listed, "total");
+    free(listed);
+
+    if (srv) {
+        cbm_mcp_server_free(srv);
+    }
+    if (saved_cache_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    free(saved_cache_copy);
+    th_rmtree(repo);
+    th_rmtree(cache);
+
+    ASSERT_NOT_NULL(srv);
+    ASSERT_TRUE(files_ok);
+    ASSERT_TRUE(first_indexed);
+    ASSERT_GT(nodes_by_root, 0);
+    ASSERT_EQ(nodes_by_nested, nodes_by_root);
+    ASSERT_TRUE(nodes_by_other <= 0);
+    ASSERT_TRUE(reused);
+    ASSERT_EQ(project_total, 1);
+    PASS();
+#endif
+}
+
 TEST(index_repository_max_source_mb_aborts_and_preserves_previous_index) {
 #if !CBM_WITH_ZOVA
     PASS();
@@ -4444,6 +4605,30 @@ TEST(search_code_path_filter_prefilter_keeps_matches) {
     ASSERT_EQ(grep_matches, 1);
 
     free(inner);
+    free(resp);
+    cbm_mcp_server_free(srv);
+    cleanup_prefilter_dir(tmp, src_path, vendor_path);
+    PASS();
+}
+
+/* #126: an invalid path_filter is a tool error naming the pattern. It used to
+ * be dropped, so the search ran unfiltered and returned excluded files. */
+TEST(search_code_invalid_path_filter_is_an_error) {
+    char tmp[512], src_path[768], vendor_path[768];
+    cbm_mcp_server_t *srv = setup_prefilter_server(tmp, sizeof(tmp), src_path, sizeof(src_path),
+                                                   vendor_path, sizeof(vendor_path));
+    ASSERT_NOT_NULL(srv);
+
+    char *resp = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":97,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"search_code\","
+             "\"arguments\":{\"pattern\":\"HandleRequest\",\"project\":\"prefilter-search\","
+             "\"path_filter\":\"src/(unclosed\"}}}");
+    ASSERT_NOT_NULL(resp);
+    ASSERT_NOT_NULL(strstr(resp, "\"isError\":true"));
+    ASSERT_NOT_NULL(strstr(resp, "invalid path_filter regex 'src/(unclosed'"));
+    ASSERT_NULL(strstr(resp, "vendor/other.go"));
+
     free(resp);
     cbm_mcp_server_free(srv);
     cleanup_prefilter_dir(tmp, src_path, vendor_path);
@@ -5156,6 +5341,73 @@ TEST(tool_detect_changes_resolves_default_branch_master) {
     ASSERT_NULL(strstr(resp, "\"isError\":true"));
     ASSERT_NOT_NULL(strstr(resp, "feature.txt"));
     ASSERT_NULL(strstr(resp, "base.txt"));
+    free(resp);
+
+    cbm_mcp_server_free(srv);
+    th_cleanup(tmp);
+    PASS();
+}
+
+/* #125: a project whose root is a subdirectory of its git repository. Git
+ * prints paths relative to the repository top level; detect_changes must
+ * report them relative to the project root, match them to indexed symbols,
+ * and leave out changes outside the project directory. */
+TEST(tool_detect_changes_project_in_repository_subdirectory) {
+    const char *proj = "detect-nested";
+    char *tmp = th_mktempdir("cbm_detect_nested");
+    ASSERT_NOT_NULL(tmp);
+    char app[CBM_SZ_1K];
+    snprintf(app, sizeof(app), "%s/app", tmp);
+
+    char cmd[CBM_SZ_2K];
+    snprintf(cmd, sizeof(cmd), "git -C \"%s\" init -q", tmp);
+    ASSERT_EQ(system(cmd), 0);
+    ASSERT_EQ(th_write_file(TH_PATH(tmp, "app/handler.go"), "package main\n"), 0);
+    ASSERT_EQ(th_write_file(TH_PATH(tmp, "outside.go"), "package outside\n"), 0);
+    snprintf(cmd, sizeof(cmd),
+             "git -C \"%s\" add -A && "
+             "git -C \"%s\" -c user.name=t -c user.email=t@t.io -c commit.gpgsign=false commit -q -m \"initial\"",
+             tmp, tmp);
+    ASSERT_EQ(system(cmd), 0);
+
+    /* One tracked change and one new file inside the project, and one of
+     * each outside it. */
+    ASSERT_EQ(th_write_file(TH_PATH(tmp, "app/handler.go"),
+                            "package main\n\nfunc HandleRequest() error {\n\treturn nil\n}\n"),
+              0);
+    ASSERT_EQ(th_write_file(TH_PATH(tmp, "app/added.go"), "package main\n"), 0);
+    ASSERT_EQ(th_write_file(TH_PATH(tmp, "outside.go"), "package outside\n\nvar changed = 1\n"), 0);
+    ASSERT_EQ(th_write_file(TH_PATH(tmp, "elsewhere.go"), "package outside\n"), 0);
+
+    cbm_store_t *fixture = cbm_store_open_memory();
+    ASSERT_NOT_NULL(fixture);
+    ASSERT_EQ(cbm_store_upsert_project(fixture, proj, app), CBM_STORE_OK);
+    cbm_node_t n = {.project = proj,
+                    .label = "Function",
+                    .name = "HandleRequest",
+                    .qualified_name = "detect-nested.main.HandleRequest",
+                    .file_path = "handler.go",
+                    .start_line = 3,
+                    .end_line = 5};
+    ASSERT_GT(cbm_store_upsert_node(fixture, &n), 0);
+    th_remove_zova_user_database();
+    ASSERT_EQ(th_publish_store_project(fixture, proj), 0);
+    cbm_store_close(fixture);
+
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    ASSERT_NOT_NULL(srv);
+    char *resp = cbm_mcp_handle_tool(srv, "detect_changes",
+                                     "{\"project\":\"detect-nested\",\"base_branch\":\"HEAD\"}");
+    ASSERT_NOT_NULL(resp);
+    char *text = extract_text_content(resp);
+    ASSERT_NOT_NULL(text);
+    ASSERT_NOT_NULL(strstr(text, "\"handler.go\""));
+    ASSERT_NOT_NULL(strstr(text, "\"added.go\""));
+    free(text);
+    ASSERT_NULL(strstr(resp, "app/"));
+    ASSERT_NULL(strstr(resp, "outside.go"));
+    ASSERT_NULL(strstr(resp, "elsewhere.go"));
+    ASSERT_NOT_NULL(strstr(resp, "HandleRequest"));
     free(resp);
 
     cbm_mcp_server_free(srv);
@@ -7666,6 +7918,7 @@ SUITE(mcp) {
     RUN_TEST(tool_index_repository_refuses_while_workspace_lease_is_held);
     RUN_TEST(tool_search_graph_includes_node_properties);
     RUN_TEST(tool_search_graph_query_honors_file_pattern_issue552);
+    RUN_TEST(tool_search_graph_query_honors_label_and_ranks_exact_name);
     RUN_TEST(tool_query_graph_basic);
     RUN_TEST(tool_query_graph_count_ignores_max_rows);
     RUN_TEST(tool_index_status_no_project);
@@ -7707,9 +7960,11 @@ SUITE(mcp) {
     RUN_TEST(index_repository_max_files_aborts_and_preserves_previous_index);
     RUN_TEST(index_repository_max_source_mb_aborts_and_preserves_previous_index);
     RUN_TEST(index_repository_failure_names_reason_and_previous_index);
+    RUN_TEST(project_path_resolves_to_owning_project);
     RUN_TEST(index_supervised_over_budget_passes_worker_response);
     RUN_TEST(search_code_path_filter_prefilter_keeps_matches);
     RUN_TEST(search_code_path_filter_matches_nothing);
+    RUN_TEST(search_code_invalid_path_filter_is_an_error);
     RUN_TEST(search_code_invalid_regex_errors_issue283);
     RUN_TEST(search_code_literal_pipe_warns_issue282);
     RUN_TEST(search_code_ampersand_accepted_issue272);
@@ -7733,6 +7988,7 @@ SUITE(mcp) {
     RUN_TEST(tool_detect_changes_not_found_rich_error);
     RUN_TEST(tool_detect_changes_reports_impacted_symbols);
     RUN_TEST(tool_detect_changes_resolves_default_branch_master);
+    RUN_TEST(tool_detect_changes_project_in_repository_subdirectory);
 
     /* Query store read-only (data integrity) */
 

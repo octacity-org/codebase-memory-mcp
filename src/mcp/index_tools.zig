@@ -221,7 +221,11 @@ fn projectNameForArgs(args: CStr) HeapStr {
     _ = c.cbm_normalize_path_sep(repo_path);
     repo_path = mcp.canonicalizeRepoPathIfExists(repo_path);
     defer c.free(repo_path);
-    return c.cbm_project_name_from_path(repo_path);
+    const derived = c.cbm_project_name_from_path(repo_path);
+    const owner = mcp.indexedProjectForPath(repo_path, true, derived, false);
+    if (owner == null) return derived;
+    c.free(derived);
+    return owner;
 }
 
 /// Every index_repository failure carries a stable `reason` code and says
@@ -715,9 +719,17 @@ fn indexRepositoryRun(srv: *Server, args: CStr) HeapStr {
     c.free(mode_str);
 
     const p = c.cbm_pipeline_new(repo_path, null, mode) orelse return textResult("failed to create pipeline", true);
-    if (name_override != null and name_override[0] != 0 and !c.cbm_pipeline_set_project_name(p, name_override)) {
-        c.cbm_pipeline_free(p);
-        return textResult("invalid project name", true);
+    if (name_override != null and name_override[0] != 0) {
+        if (!c.cbm_pipeline_set_project_name(p, name_override)) {
+            c.cbm_pipeline_free(p);
+            return textResult("invalid project name", true);
+        }
+    } else {
+        // Without a name, re-index the project that already owns this root
+        // instead of creating a second one under the path-derived name.
+        const owner = mcp.indexedProjectForPath(repo_path, true, c.cbm_pipeline_project_name(p), false);
+        defer c.free(owner);
+        if (owner != null) _ = c.cbm_pipeline_set_project_name(p, owner);
     }
 
     const max_files: c_int = if (srv.config != null) c.cbm_config_get_int(srv.config, c.CBM_CONFIG_INDEX_MAX_FILES, 0) else 0;

@@ -35,6 +35,10 @@ const POLL_BASE_MS = 5000;
 const POLL_FILE_STEP = 500; // add 1s per this many files
 const POLL_MAX_MS = 60000;
 
+/// Retry backoff for a project whose index keeps failing: the delay doubles
+/// with each consecutive failure, up to this cap (ms).
+const RETRY_MAX_MS = 30 * 60 * 1000;
+
 /// Stale-root pruning (#286): a watched project whose root directory stays
 /// missing is pruned — its cached DB is deleted and the watch entry removed.
 /// Deletion is destructive (the DB can hold user-authored data such as the
@@ -81,6 +85,13 @@ const ProjectState = struct {
     /// to last_dirty_sig only after a successful refresh. 0 = clean tree.
     last_dirty_sig: u64,
     pending_dirty_sig: u64,
+    /// Retry backoff: consecutive index failures of one unchanged state (the
+    /// head and dirty signature below), and how many due polls still skip
+    /// the retry. A success or a different state clears all four.
+    index_failures: c_int,
+    retry_skips_left: c_int,
+    failed_head: [HEAD_MAX]u8,
+    failed_dirty_sig: u64,
     /// consecutive polls where root was missing (ENOENT/ENOTDIR)
     missing_root_count: c_int,
     /// cbm_now_ms() of the streak's first miss (0 = no streak)
@@ -170,6 +181,15 @@ fn popenGit(cmd: *[CMD_MAX]u8, comptime fmt: []const u8, args: anytype) ?*c.FILE
 pub export fn cbm_watcher_poll_interval_ms(file_count: c_int) c_int {
     const ms = POLL_BASE_MS +% @divTrunc(file_count, POLL_FILE_STEP) *% MSEC_PER_SEC;
     return @min(ms, POLL_MAX_MS);
+}
+
+/// Due polls that skip the retry after `failures` consecutive failures: the
+/// retry runs every 2^failures polls, bounded so the delay stays within
+/// RETRY_MAX_MS at this poll interval.
+fn retrySkips(failures: c_int, interval_ms: c_int) c_int {
+    const max_polls = @max(1, @divTrunc(RETRY_MAX_MS, @max(interval_ms, 1)));
+    const shift: u5 = @intCast(@min(failures, 20));
+    return @min(@as(c_int, 1) << shift, max_polls) - 1;
 }
 
 // ── Git helpers ────────────────────────────────────────────────────
@@ -626,7 +646,8 @@ fn initBaseline(s: *ProjectState) void {
 /// HEAD movements are recorded as PENDING, not handled (#17 item 3): the
 /// observed head lands in pending_head and is committed to last_head only
 /// after the index refresh succeeds (pollProject). Consequences:
-///   - A failed index keeps the movement pending → retry next poll.
+///   - A failed index keeps the movement pending → retried with backoff
+///     (pollProject) until it succeeds or the state changes.
 ///   - Further movements while pending coalesce into the newest observed head
 ///     (one retry covers them all — identical events are not re-queued).
 /// The dirty-state signature is staged the same way, in pending_dirty_sig.
@@ -751,6 +772,25 @@ fn pollProject(w: *Watcher, s: *ProjectState, now: i64, reindexed: *c_int) void 
         return;
     }
 
+    // Back off while the state whose index failed is unchanged. A new head
+    // or dirty state is a new change and is indexed without delay.
+    if (s.index_failures > 0) {
+        const same_state = s.pending_dirty_sig == s.failed_dirty_sig and
+            std.mem.eql(u8, std.mem.sliceTo(&s.pending_head, 0), std.mem.sliceTo(&s.failed_head, 0));
+        if (!same_state) {
+            s.index_failures = 0;
+            s.retry_skips_left = 0;
+        } else if (s.retry_skips_left > 0) {
+            s.retry_skips_left -= 1;
+            s.next_poll_ns = now + @as(i64, s.interval_ms) * NS_PER_MS;
+            w.lock();
+            s.published_interval_ms = s.interval_ms;
+            s.last_scan_unix_s = @as(i64, c.time(null));
+            w.unlock();
+            return;
+        }
+    }
+
     // Trigger reindex.
     logInfo("watcher.changed", .{ "project", s.name(), "strategy", "git" });
     if (w.index_fn) |index_fn| {
@@ -767,6 +807,8 @@ fn pollProject(w: *Watcher, s: *ProjectState, now: i64, reindexed: *c_int) void 
                 s.pending_head[0] = 0;
             }
             s.last_dirty_sig = s.pending_dirty_sig;
+            s.index_failures = 0;
+            s.retry_skips_left = 0;
             // Refresh file count for interval.
             s.file_count = gitFileCount(s.root());
             s.interval_ms = cbm_watcher_poll_interval_ms(s.file_count);
@@ -776,8 +818,14 @@ fn pollProject(w: *Watcher, s: *ProjectState, now: i64, reindexed: *c_int) void 
             logInfo("watcher.index.retry", .{ "project", s.name() });
         } else {
             // Keep the change pending: last_head still holds the previously
-            // indexed head, so the next poll re-detects and retries.
-            logWarn("watcher.index.err", .{ "project", s.name(), "retry", "pending" });
+            // indexed head, so a later poll re-detects and retries. Each
+            // consecutive failure of the same state doubles the wait.
+            if (s.index_failures < 20) s.index_failures += 1;
+            copyZ(&s.failed_head, std.mem.sliceTo(&s.pending_head, 0));
+            s.failed_dirty_sig = s.pending_dirty_sig;
+            s.retry_skips_left = retrySkips(s.index_failures, s.interval_ms);
+            const skips_str = std.mem.printSentinel(&num_buf, "{d}", .{s.retry_skips_left}, 0) catch unreachable;
+            logWarn("watcher.index.err", .{ "project", s.name(), "retry", "pending", "skip_polls", skips_str.ptr });
         }
     }
 

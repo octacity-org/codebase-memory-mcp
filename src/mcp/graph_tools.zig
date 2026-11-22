@@ -759,7 +759,7 @@ fn handleSearchGraphFlagged(args: CStr, project: HeapStr) HeapStr {
     var fts_query: [BM25_QUERY_BUF]u8 = undefined;
     if (has_query) {
         if (zovaFtsMatch(s.query, &fts_query)) {
-            rc = c.cbm_zova_repository_search_fts(repo, workspace_id, &fts_query, s.file_pattern, params.limit, params.offset, &out);
+            rc = c.cbm_zova_repository_search_fts(repo, workspace_id, &fts_query, s.file_pattern, s.label, s.query, params.limit, params.offset, &out);
         }
     } else if (has_structural_filters) {
         rc = c.cbm_zova_repository_search(repo, workspace_id, &params, &out);
@@ -996,7 +996,7 @@ fn handleSearchGraphCatalog(args: CStr, requested: *const mcp.ProjectScope) Heap
         var fts_query: [BM25_QUERY_BUF]u8 = undefined;
         if (has_query) {
             search_status = if (zovaFtsMatch(s.query, &fts_query))
-                c.cbm_zova_catalog_search_fts(catalog, &scope, &fts_query, s.file_pattern, limit, offset, &output)
+                c.cbm_zova_catalog_search_fts(catalog, &scope, &fts_query, s.file_pattern, s.label, s.query, limit, offset, &output)
             else
                 c.CBM_STORE_OK;
         } else {

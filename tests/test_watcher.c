@@ -724,8 +724,12 @@ TEST(watcher_failed_index_keeps_change_pending) {
     cbm_watcher_poll_once(w);
     ASSERT_EQ(index_call_count, 1); /* attempted once, failed */
 
-    /* No further repo changes — but the change must still be pending: the
-     * retry succeeds (fail budget exhausted) and consumes the change. */
+    /* No further repo changes — but the change must still be pending. After
+     * one failure the retry waits one poll, then succeeds (fail budget
+     * exhausted) and consumes the change. */
+    cbm_watcher_touch(w, "pend-repo");
+    cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 1); /* backing off */
     cbm_watcher_touch(w, "pend-repo");
     cbm_watcher_poll_once(w);
     ASSERT_EQ(index_call_count, 2); /* retried without a new event, succeeded */
@@ -734,6 +738,74 @@ TEST(watcher_failed_index_keeps_change_pending) {
     cbm_watcher_touch(w, "pend-repo");
     cbm_watcher_poll_once(w);
     ASSERT_EQ(index_call_count, 2);
+
+    cbm_watcher_free(w);
+    cbm_store_close(store);
+    th_rmtree(tmpdir);
+    PASS();
+}
+
+/* #137: a project whose index keeps failing is retried with a doubling
+ * delay instead of on every poll, and a new change resets the delay. */
+TEST(watcher_failed_index_backs_off_until_change) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cbm_watcher_backoff_XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+    if (wt_git(tmpdir, "init -q") != 0) {
+        th_rmtree(tmpdir);
+        FAIL("git init failed");
+    }
+    {
+        char p[300];
+        th_write_file(wt_path(p, sizeof(p), tmpdir, "file.txt"), "v1\n");
+    }
+    wt_git(tmpdir, "add file.txt");
+    wt_git(tmpdir, "commit -q -m v1");
+
+    cbm_store_t *store = cbm_store_open_memory();
+    cbm_watcher_t *w = cbm_watcher_new(store, index_callback_fail_first, NULL);
+    cbm_watcher_watch(w, "backoff-repo", tmpdir);
+    index_call_count = 0;
+    index_fail_remaining = 1000; /* every attempt fails */
+
+    cbm_watcher_poll_once(w); /* baseline */
+
+    {
+        char p[300];
+        th_append_file(wt_path(p, sizeof(p), tmpdir, "file.txt"), "v2\n");
+    }
+    wt_git(tmpdir, "add file.txt");
+    wt_git(tmpdir, "commit -q -m v2");
+
+    /* 15 due polls of one unchanged failing state: attempts land on polls
+     * 1, 3, 7 and 15 (waits of 1, 3 and 7 polls), not on all 15. */
+    for (int i = 0; i < 15; i++) {
+        cbm_watcher_touch(w, "backoff-repo");
+        cbm_watcher_poll_once(w);
+    }
+    ASSERT_EQ(index_call_count, 4);
+
+    /* A new commit is a new change: indexed on the next poll, no wait. */
+    {
+        char p[300];
+        th_append_file(wt_path(p, sizeof(p), tmpdir, "file.txt"), "v3\n");
+    }
+    wt_git(tmpdir, "add file.txt");
+    wt_git(tmpdir, "commit -q -m v3");
+    cbm_watcher_touch(w, "backoff-repo");
+    cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 5);
+
+    /* The delay restarted with the new state: one skipped poll, then a
+     * retry, which succeeds and clears the backoff. */
+    index_fail_remaining = 0;
+    cbm_watcher_touch(w, "backoff-repo");
+    cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 5);
+    cbm_watcher_touch(w, "backoff-repo");
+    cbm_watcher_poll_once(w);
+    ASSERT_EQ(index_call_count, 6);
 
     cbm_watcher_free(w);
     cbm_store_close(store);
@@ -2363,6 +2435,7 @@ SUITE(watcher) {
     /* Refresh state machine (#17 item 3): handled only after successful
      * refresh, coalescing, retry eligibility, mid-index changes stay pending */
     RUN_TEST(watcher_failed_index_keeps_change_pending);
+    RUN_TEST(watcher_failed_index_backs_off_until_change);
     RUN_TEST(watcher_pending_changes_coalesce_to_newest_head);
     RUN_TEST(watcher_change_during_index_stays_pending);
     RUN_TEST(watcher_null_poll_once);

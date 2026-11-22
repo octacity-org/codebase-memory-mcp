@@ -786,6 +786,42 @@ pub fn realPath(path: CStr, out: *[4096]u8) bool {
     return c.realpath(path, out) != null;
 }
 
+/// The indexed project that owns a canonical path, as its selector (what
+/// tools take as `project`) or its project name: the project whose root is
+/// the path itself, or with `exact` false the one with the longest root
+/// containing it. Among projects sharing that root, the one named `prefer`
+/// wins. Null when no indexed root qualifies. Caller frees.
+pub fn indexedProjectForPath(path_c: CStr, exact: bool, prefer: CStr, want_selector: bool) HeapStr {
+    if (path_c == null) return null;
+    var db_path: [1024]u8 = undefined;
+    if (c.cbm_zova_user_database_path(&db_path, db_path.len) != 0 or !c.cbm_file_exists(&db_path)) return null;
+    const catalog = c.cbm_zova_catalog_open(&db_path) orelse return null;
+    var listed = std.mem.zeroes(c.cbm_zova_catalog_scope_t);
+    const rc = c.cbm_zova_catalog_list(catalog, &listed);
+    c.cbm_zova_catalog_close(catalog);
+    defer c.cbm_zova_catalog_scope_free(&listed);
+    if (rc != c.CBM_STORE_OK) return null;
+
+    const path = std.mem.trimEnd(u8, std.mem.span(path_c), "/");
+    var best: ?*const c.cbm_zova_catalog_project_t = null;
+    var best_len: usize = 0;
+    var i: usize = 0;
+    while (i < @as(usize, @intCast(listed.count))) : (i += 1) {
+        const project = &listed.projects[i];
+        if (project.root_path == null) continue;
+        const root = std.mem.trimEnd(u8, std.mem.span(project.root_path), "/");
+        if (root.len == 0 or !std.mem.startsWith(u8, path, root)) continue;
+        if (path.len != root.len and (exact or path[root.len] != '/')) continue;
+        const preferred = prefer != null and project.project != null and cEql(project.project, prefer);
+        if (best == null or root.len > best_len or (root.len == best_len and preferred)) {
+            best = project;
+            best_len = root.len;
+        }
+    }
+    const found = best orelse return null;
+    return dup(if (want_selector) found.selector else found.project);
+}
+
 fn normalizeProjectArg(project_in: HeapStr) HeapStr {
     var project = project_in;
     if (project == null or (c.strchr(project, '/') == null and c.strchr(project, '\\') == null)) return project;
@@ -798,6 +834,14 @@ fn normalizeProjectArg(project_in: HeapStr) HeapStr {
 
     project = canonicalizeRepoPathIfExists(project);
     const normalized = c.cbm_project_name_from_path(project);
+    // A path at or inside an indexed root names the project that owns it
+    // (the longest such root), whatever name that project was indexed under.
+    const owner = indexedProjectForPath(project, false, normalized, true);
+    if (owner != null) {
+        c.free(normalized);
+        c.free(project);
+        return owner;
+    }
     if (normalized != null) {
         c.free(project);
         return normalized;
