@@ -199,19 +199,29 @@ fn handleDetectChanges(srv: *Server, args: CStr) HeapStr {
     //      brand-new file never appeared until a manual re-index (#520).
     // status --porcelain prefixes each path with a 2-char code + space
     // ("?? path", "A  path"); the prefix is stripped when parsing below.
+    //
+    // The project root may be a subdirectory of its git repository. Git prints
+    // paths relative to the repository top level, while indexed file paths are
+    // relative to the project root, so each command is limited to the project
+    // directory ("-- .") and the directory's prefix is stripped below.
+    var prefix_buf: [1024]u8 = undefined;
+    const prefix: []const u8 = if (detectGitFirstLine(sp(root_path), "rev-parse --show-prefix", &prefix_buf))
+        std.mem.sliceTo(&prefix_buf, 0)
+    else
+        "";
     var cmd: [2048]u8 = undefined;
     const root = sp(root_path);
     const base = sp(base_branch);
     if (is_windows) {
-        _ = mcp.bprint(&cmd, "git -C \"{s}\" diff --name-only \"{s}\"...HEAD 2>NUL & " ++
-            "git -C \"{s}\" diff --name-only 2>NUL & " ++
+        _ = mcp.bprint(&cmd, "git -C \"{s}\" diff --name-only \"{s}\"...HEAD -- . 2>NUL & " ++
+            "git -C \"{s}\" diff --name-only -- . 2>NUL & " ++
             "git --no-optional-locks -C \"{s}\" status --porcelain " ++
-            "--untracked-files=normal 2>NUL", .{ root, base, root, root });
+            "--untracked-files=normal -- . 2>NUL", .{ root, base, root, root });
     } else {
-        _ = mcp.bprint(&cmd, "{{ git -C '{s}' diff --name-only '{s}'...HEAD 2>/dev/null; " ++
-            "git -C '{s}' diff --name-only 2>/dev/null; " ++
+        _ = mcp.bprint(&cmd, "{{ git -C '{s}' diff --name-only '{s}'...HEAD -- . 2>/dev/null; " ++
+            "git -C '{s}' diff --name-only -- . 2>/dev/null; " ++
             "git --no-optional-locks -C '{s}' status --porcelain " ++
-            "--untracked-files=normal 2>/dev/null; }} | sort -u", .{ root, base, root, root });
+            "--untracked-files=normal -- . 2>/dev/null; }} | sort -u", .{ root, base, root, root });
     }
 
     const fp = c.cbm_popen_git(&cmd);
@@ -246,6 +256,7 @@ fn handleDetectChanges(srv: *Server, args: CStr) HeapStr {
             start = 3;
             if (std.mem.indexOfPos(u8, s, start, " -> ")) |arrow| start = arrow + 4;
         }
+        if (std.mem.startsWith(u8, s[start..], prefix)) start += prefix.len;
         if (start >= s.len) continue;
         const path_line: [*c]const u8 = &line[start];
 

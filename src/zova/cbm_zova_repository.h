@@ -215,9 +215,13 @@ void cbm_zova_identities_free(cbm_zova_identity_node_t *nodes, int node_count,
                               cbm_zova_identity_edge_t *edges, int edge_count);
 int cbm_zova_repository_search(cbm_zova_repository_t *repo, const char *workspace_id,
                                const cbm_search_params_t *params, cbm_search_output_t *out);
+/* Full-text search. file_pattern (a path glob) and label narrow the matches;
+ * nodes named exactly exact_name (case-insensitive) rank first. Each of the
+ * three may be NULL. */
 int cbm_zova_repository_search_fts(cbm_zova_repository_t *repo, const char *workspace_id,
                                    const char *query,
-                                   const char *file_pattern, int limit, int offset,
+                                   const char *file_pattern, const char *label,
+                                   const char *exact_name, int limit, int offset,
                                    cbm_search_output_t *out);
 int cbm_zova_repository_index_status(cbm_zova_repository_t *repo, const char *workspace_id,
                                       int64_t *generation,
@@ -277,6 +281,7 @@ int cbm_zova_catalog_resolve(cbm_zova_catalog_t *catalog, const char *const *sel
 int cbm_zova_catalog_search_fts(cbm_zova_catalog_t *catalog,
                                 const cbm_zova_catalog_scope_t *scope,
                                 const char *query, const char *file_pattern,
+                                const char *label, const char *exact_name,
                                 int limit, int offset, cbm_search_output_t *out);
 int cbm_zova_catalog_search(cbm_zova_catalog_t *catalog,
                             const cbm_zova_catalog_scope_t *scope,
