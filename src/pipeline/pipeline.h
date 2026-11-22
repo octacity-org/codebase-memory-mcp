@@ -122,6 +122,13 @@ cbm_pipeline_route_t cbm_pipeline_get_last_route(const cbm_pipeline_t *p);
  * an older index format and rebuilt it in full (CBM_INDEX_FORMAT_VERSION_STR). */
 bool cbm_pipeline_had_format_migration(const cbm_pipeline_t *p);
 
+/* Stable code for why the most recent cbm_pipeline_run() failed:
+ * "discover_failed" (the file walk failed), "persist_failed" (publishing the
+ * new generation failed) or "cancelled". NULL when the run succeeded, when it
+ * returned one of the CBM_PIPELINE_ABORT_* codes, or when the failure has no
+ * code of its own. The string is static. */
+const char *cbm_pipeline_failure_reason(const cbm_pipeline_t *p);
+
 typedef struct {
     bool completed;
     bool delta;

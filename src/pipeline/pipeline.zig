@@ -91,6 +91,9 @@ const Pipeline = extern struct {
     last_route: c.cbm_pipeline_route_t,
     /// The last run rebuilt a generation stamped with an older index format.
     format_migration: bool,
+    /// Why the last run failed, as a stable code; null when it did not fail
+    /// or the cause has no code of its own. Points at a string literal.
+    failure_reason: CStr,
     zova_publish_stats: c.cbm_pipeline_zova_publish_stats_t,
 
     saved_summary: c.cbm_project_summary_export_t,
@@ -446,6 +449,12 @@ pub export fn cbm_pipeline_share_next_id(gb: ?*Gbuf, shared_ids: *i64) void {
 
 pub export fn cbm_pipeline_had_format_migration(p: ?*const Pipeline) bool {
     return if (p) |pl| pl.format_migration else false;
+}
+
+pub export fn cbm_pipeline_failure_reason(p: ?*const Pipeline) CStr {
+    const pl = p orelse return null;
+    // A cancelled run fails wherever it happened to stop; name the cancel.
+    return if (cancelled(pl)) "cancelled" else pl.failure_reason;
 }
 
 pub export fn cbm_pipeline_get_zova_publish_stats(
@@ -1395,6 +1404,7 @@ fn pipelinePublishZovaUserDatabase(
             "project", @as(CStr, p.project_name),
             "reason",  "publication_failed",
         });
+        p.failure_reason = "persist_failed";
         return rc;
     }
     p.zova_publish_ms = result.publish_ms;
@@ -1678,6 +1688,7 @@ pub export fn cbm_pipeline_run(p_c: ?*Pipeline) c_int {
     const p = p_c orelse return c.CBM_NOT_FOUND;
     p.last_route = c.CBM_PIPELINE_ROUTE_UNKNOWN;
     p.format_migration = false;
+    p.failure_reason = null;
     p.discovered_files = 0;
     p.discovered_source_bytes = 0;
 
@@ -1723,6 +1734,7 @@ pub export fn cbm_pipeline_run(p_c: ?*Pipeline) c_int {
         "elapsed_ms", elapsedText(t0),
     });
     if (rc != 0 or cancelled(p)) {
+        if (rc != 0) p.failure_reason = "discover_failed";
         rc = c.CBM_NOT_FOUND;
     } else {
         p.discovered_files = file_count;
