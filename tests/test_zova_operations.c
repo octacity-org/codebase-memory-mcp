@@ -1078,7 +1078,8 @@ TEST(zova_operations_database_compact_noops_below_policy_threshold) {
 /* Each tests/fixtures/zova-format-<n>/cbm.zova is a one-workspace database
  * with CBM schema 7 written by an older release:
  *   format 9:  release v1.0.1 (Zova 0.24.0), 18 nodes;
- *   format 12: CBM built against Zova 1.3.0, 23 nodes.
+ *   format 12: CBM built against Zova 1.3.0, 23 nodes;
+ *   format 13: CBM built against Zova 1.4.0, 25 nodes.
  * The tests migrate the fixture in place, so they work on a copy. */
 static int operations_copy_format_fixture(const char *fixture, const char *destination) {
     const char *directory = getenv("CBM_TEST_FIXTURE_DIR");
@@ -1156,6 +1157,11 @@ TEST(zova_operations_migrate_format_upgrades_format9_database) {
 
 TEST(zova_operations_migrate_format_upgrades_format12_database) {
     ASSERT_EQ(operations_migrate_format_fixture("zova-format-12", 23), 0);
+    PASS();
+}
+
+TEST(zova_operations_migrate_format_upgrades_format13_database) {
+    ASSERT_EQ(operations_migrate_format_fixture("zova-format-13", 25), 0);
     PASS();
 }
 
@@ -3548,6 +3554,7 @@ SUITE(zova_operations) {
     RUN_TEST(zova_operations_refuse_while_index_coordination_is_held);
     RUN_TEST(zova_operations_migrate_format_upgrades_format9_database);
     RUN_TEST(zova_operations_migrate_format_upgrades_format12_database);
+    RUN_TEST(zova_operations_migrate_format_upgrades_format13_database);
     RUN_TEST(zova_operations_database_compact_noops_below_policy_threshold);
     RUN_TEST(zova_operations_database_compact_reclaims_verified_database);
     RUN_TEST(zova_operations_database_compact_preserves_two_workspace_public_state);

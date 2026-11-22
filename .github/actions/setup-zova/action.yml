@@ -21,7 +21,7 @@ runs:
     - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       with:
         repository: ata-sesli/zova
-        ref: 23a75306d6c9ff44a6bdf24c8120b302439ce726
+        ref: 5d760d42468685123be8955ffb209004791c3ae3
         path: .ci/zova
         persist-credentials: false
 
@@ -33,7 +33,7 @@ runs:
           .ci/zova/zig-out
           ${{ runner.temp }}/zova-cache
           ${{ runner.temp }}/zig-global-cache
-        key: zova-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ inputs.cpu }}-zig-0.17.0-23a75306d6c9ff44a6bdf24c8120b302439ce726
+        key: zova-${{ runner.os }}-${{ runner.arch }}-${{ inputs.target }}-${{ inputs.cpu }}-zig-0.17.0-5d760d42468685123be8955ffb209004791c3ae3
 
     - name: Build pinned Zova
       if: steps.zova-cache.outputs.cache-hit != 'true'
@@ -67,13 +67,13 @@ runs:
     - name: Verify pinned Zova
       shell: bash
       env:
-        EXPECTED_COMMIT: 23a75306d6c9ff44a6bdf24c8120b302439ce726
+        EXPECTED_COMMIT: 5d760d42468685123be8955ffb209004791c3ae3
       run: |
         set -euo pipefail
         ZOVA_ROOT="$GITHUB_WORKSPACE/.ci/zova"
         test "$(git -C "$ZOVA_ROOT" rev-parse HEAD)" = "$EXPECTED_COMMIT"
         test -f "$ZOVA_ROOT/zig-out/lib/libzova_c.a"
-        grep -q 'Zova C ABI, v1.4.0' "$ZOVA_ROOT/include/zova.h"
+        grep -q 'Zova C ABI, v1.5.0' "$ZOVA_ROOT/include/zova.h"
         {
           echo "ZOVA_ROOT=$ZOVA_ROOT"
           echo "CBM_ZOVA_PIN_ROOT=$ZOVA_ROOT"
