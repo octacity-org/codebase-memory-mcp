@@ -197,16 +197,62 @@ fn buildIndexSuccessResponse(doc: ?*MutDoc, root: ?*MutVal, project_name: CStr, 
     return degraded;
 }
 
+/// Generation the project currently serves, 0 when it has no index.
+fn servedGeneration(project: CStr) i64 {
+    var path: [1024]u8 = undefined;
+    const repo = mcp.openRepository(&path, project) orelse return 0;
+    defer c.cbm_zova_repository_close(repo);
+    var generation: i64 = 0;
+    var indexed_at: HeapStr = null;
+    const rc = c.cbm_zova_repository_index_status(repo, c.cbm_zova_repository_workspace_id(repo), &generation, &indexed_at);
+    c.free(indexed_at);
+    return if (rc == c.CBM_STORE_OK and generation > 0) generation else 0;
+}
+
+/// Project name index_repository uses for these arguments: the `name`
+/// override, else the name derived from the canonical repo path. Caller frees.
+fn projectNameForArgs(args: CStr) HeapStr {
+    const name = mcp.strArg(args, "name");
+    defer c.free(name);
+    if (name != null and name[0] != 0) return c.cbm_project_name_from_path(name);
+    var repo_path = mcp.strArg(args, "repo_path");
+    if (repo_path == null) repo_path = mcp.strArg(args, "path");
+    if (repo_path == null) return null;
+    _ = c.cbm_normalize_path_sep(repo_path);
+    repo_path = mcp.canonicalizeRepoPathIfExists(repo_path);
+    defer c.free(repo_path);
+    return c.cbm_project_name_from_path(repo_path);
+}
+
+/// Every index_repository failure carries a stable `reason` code and says
+/// what happened to the index that served before the run:
+///   "preserved" — the earlier generation still serves;
+///   "none"      — the project had no index and still has none;
+///   "replaced"  — the run published a new generation before it failed.
+fn addFailureReason(doc: ?*MutDoc, root: ?*MutVal, reason: Str, before: i64, after: i64) void {
+    _ = c.yyjson_mut_obj_add_str(doc, root, "status", "error");
+    _ = c.yyjson_mut_obj_add_str(doc, root, "reason", reason);
+    const previous: Str = if (after == 0) "none" else if (before != 0 and after != before) "replaced" else "preserved";
+    _ = c.yyjson_mut_obj_add_str(doc, root, "previous_index", previous);
+}
+
 /// Response for a worker that crashed/hung/failed without producing a
 /// result. The crash is already contained (this process survived); report it
 /// rather than dying.
-fn buildWorkerFailureResponse(args: CStr, outcome: c.cbm_proc_outcome_t) HeapStr {
+fn buildWorkerFailureResponse(args: CStr, outcome: c.cbm_proc_outcome_t, generation_before: i64) HeapStr {
     const repo_path = mcp.strArg(args, "repo_path");
     defer c.free(repo_path);
+    const project = projectNameForArgs(args);
+    defer c.free(project);
     const doc = c.yyjson_mut_doc_new(null);
     const root = c.yyjson_mut_obj(doc);
     c.yyjson_mut_doc_set_root(doc, root);
-    _ = c.yyjson_mut_obj_add_str(doc, root, "status", "error");
+    const reason: Str = switch (outcome) {
+        c.CBM_PROC_HANG => "worker_hung",
+        c.CBM_PROC_CRASH => "worker_crashed",
+        else => "worker_failed",
+    };
+    addFailureReason(doc, root, reason, generation_before, servedGeneration(project));
     _ = c.yyjson_mut_obj_add_str(doc, root, "outcome", c.cbm_proc_outcome_str(outcome));
     _ = c.yyjson_mut_obj_add_str(doc, root, "hint", if (outcome == c.CBM_PROC_HANG)
         "Indexing worker timed out (a file made no progress). The worker was " ++
@@ -353,6 +399,14 @@ fn indexRunSupervisedImpl(srv: ?*Server, args: CStr) HeapStr {
     supervisorInvalidateStore(srv);
     defer supervisorInvalidateStore(srv);
 
+    // Read before any worker runs, so a failure can say whether the index
+    // that served before is still the one serving.
+    const generation_before = generation_before: {
+        const project = projectNameForArgs(args);
+        defer c.free(project);
+        break :generation_before servedGeneration(project);
+    };
+
     // First attempt: normal parallel run.
     var wr: c.cbm_index_worker_result_t = undefined;
     const rc = c.cbm_index_spawn_worker(args, false, null, null, &wr);
@@ -476,7 +530,7 @@ fn indexRunSupervisedImpl(srv: ?*Server, args: CStr) HeapStr {
     }
 
     if (resp != null) return resp;
-    return buildWorkerFailureResponse(args, last_outcome);
+    return buildWorkerFailureResponse(args, last_outcome, generation_before);
 }
 
 // ── Index job queue ──────────────────────────────────────────────
@@ -728,9 +782,7 @@ fn indexRepositoryRun(srv: *Server, args: CStr) HeapStr {
             "budget_mb",   @as(CStr, mcp.fmtZ(&budget_text, "{d}", .{budget_mb})),
             "peak_rss_mb", @as(CStr, mcp.fmtZ(&peak_text, "{d}", .{peak_rss_mb})),
         });
-        _ = c.yyjson_mut_obj_add_str(doc, root, "status", "error");
-        _ = c.yyjson_mut_obj_add_str(doc, root, "reason", "over_memory_budget");
-        _ = c.yyjson_mut_obj_add_str(doc, root, "previous_index", "preserved");
+        addFailureReason(doc, root, "over_memory_budget", 0, servedGeneration(project_name));
         _ = c.yyjson_mut_obj_add_int(doc, root, "budget_mb", budget_mb);
         _ = c.yyjson_mut_obj_add_int(doc, root, "peak_rss_mb", peak_rss_mb);
         _ = c.yyjson_mut_obj_add_str(doc, root, "hint", if (c.cbm_mem_budget_explicit())
@@ -755,9 +807,7 @@ fn indexRepositoryRun(srv: *Server, args: CStr) HeapStr {
             "discovered_files", @as(CStr, mcp.fmtZ(&files_text, "{d}", .{discovered_files})),
             "index_max_files",  @as(CStr, mcp.fmtZ(&limit_text, "{d}", .{max_files})),
         });
-        _ = c.yyjson_mut_obj_add_str(doc, root, "status", "error");
-        _ = c.yyjson_mut_obj_add_str(doc, root, "reason", "max_files_exceeded");
-        _ = c.yyjson_mut_obj_add_str(doc, root, "previous_index", "preserved");
+        addFailureReason(doc, root, "max_files_exceeded", 0, servedGeneration(project_name));
         _ = c.yyjson_mut_obj_add_int(doc, root, "index_max_files", max_files);
         _ = c.yyjson_mut_obj_add_int(doc, root, "discovered_files", discovered_files);
         const hint = mcp.fmtZ(&hint_buf, "Indexing stopped: discovered {d} files, which exceeds index_max_files ({d}); no partial graph was published and the previous index still serves. Raise index_max_files or exclude large subtrees.", .{ discovered_files, max_files });
@@ -775,18 +825,29 @@ fn indexRepositoryRun(srv: *Server, args: CStr) HeapStr {
             "discovered_source_mb", @as(CStr, mcp.fmtZ(&mb_text, "{d}", .{discovered_mb})),
             "index_max_source_mb",  @as(CStr, mcp.fmtZ(&limit_text, "{d}", .{max_source_mb})),
         });
-        _ = c.yyjson_mut_obj_add_str(doc, root, "status", "error");
-        _ = c.yyjson_mut_obj_add_str(doc, root, "reason", "max_source_mb_exceeded");
-        _ = c.yyjson_mut_obj_add_str(doc, root, "previous_index", "preserved");
+        addFailureReason(doc, root, "max_source_mb_exceeded", 0, servedGeneration(project_name));
         _ = c.yyjson_mut_obj_add_int(doc, root, "index_max_source_mb", max_source_mb);
         _ = c.yyjson_mut_obj_add_int(doc, root, "discovered_source_mb", discovered_mb);
         _ = c.yyjson_mut_obj_add_int(doc, root, "discovered_source_bytes", discovered_bytes);
         const hint = mcp.fmtZ(&hint_buf, "Indexing stopped: discovered {d} MiB ({d} bytes) of source, which exceeds index_max_source_mb ({d} MiB); no partial graph was published and the previous index still serves. Raise index_max_source_mb or exclude large subtrees.", .{ discovered_mb, discovered_bytes, max_source_mb });
         _ = c.yyjson_mut_obj_add_strcpy(doc, root, "hint", hint);
     } else {
-        _ = c.yyjson_mut_obj_add_str(doc, root, "status", "error");
-        _ = c.yyjson_mut_obj_add_str(doc, root, "hint", "Pipeline failed. Check repo_path exists and contains source files. " ++
-            "Try mode='fast' for a quicker diagnostic run.");
+        // Nothing is published on these paths: discovery and cancellation stop
+        // before publication, and a failed publication rolls back.
+        const reported = c.cbm_pipeline_failure_reason(p);
+        const reason: Str = if (reported != null) @ptrCast(reported) else "pipeline_failed";
+        addFailureReason(doc, root, reason, 0, servedGeneration(project_name));
+        _ = c.yyjson_mut_obj_add_str(doc, root, "hint", if (mcp.cEql(reason, "persist_failed"))
+            "Indexing finished but writing the new index failed; nothing was " ++
+                "published. Check free disk space and that the cache directory " ++
+                "is writable, then re-run."
+        else if (mcp.cEql(reason, "cancelled"))
+            "Indexing was cancelled before publication. Re-run to index."
+        else if (mcp.cEql(reason, "discover_failed"))
+            "File discovery failed. Check repo_path exists and is a readable directory."
+        else
+            "Pipeline failed. Check repo_path exists and contains source files. " ++
+                "Try mode='fast' for a quicker diagnostic run.");
     }
 
     const json = mcp.docToStr(doc);

@@ -4087,6 +4087,86 @@ TEST(index_repository_max_files_aborts_and_preserves_previous_index) {
 #endif
 }
 
+/* #160: every index_repository failure names a stable reason code and says
+ * what happened to the index that served before the run. */
+TEST(index_repository_failure_names_reason_and_previous_index) {
+#if !CBM_WITH_ZOVA || defined(_WIN32)
+    PASS();
+#else
+    char repo[512];
+    char cache[512];
+    snprintf(repo, sizeof(repo), "%s/cbm-mcp-reason-repo-XXXXXX", cbm_tmpdir());
+    snprintf(cache, sizeof(cache), "%s/cbm-mcp-reason-cache-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(repo));
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    bool files_ok = write_py_files(repo, 2, 0);
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    char args[1024];
+
+    /* A root that does not exist: discovery fails and there is no index. */
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s/missing\",\"name\":\"reason\"}", repo);
+    char *missing = srv ? cbm_mcp_handle_tool(srv, "index_repository", args) : NULL;
+    bool discover_named =
+        response_contains_json_fragment(missing, "\"status\":\"error\"") &&
+        response_contains_json_fragment(missing, "\"reason\":\"discover_failed\"") &&
+        response_contains_json_fragment(missing, "\"previous_index\":\"none\"");
+    free(missing);
+
+    snprintf(args, sizeof(args), "{\"repo_path\":\"%s\",\"name\":\"reason\"}", repo);
+    char *first = srv && files_ok ? cbm_mcp_handle_tool(srv, "index_repository", args) : NULL;
+    bool first_indexed = response_contains_json_fragment(first, "\"status\":\"indexed\"");
+    int nodes_first = budget_result_int(first, "nodes");
+    free(first);
+
+    /* A database that cannot be written: publication fails and rolls back. */
+    char database[600];
+    snprintf(database, sizeof(database), "%s/cbm.zova", cache);
+    files_ok = files_ok && write_py_files(repo, 4, 0);
+    bool locked = chmod(database, 0444) == 0;
+    char *second = srv && files_ok && locked ? cbm_mcp_handle_tool(srv, "index_repository", args) : NULL;
+    bool persist_named =
+        response_contains_json_fragment(second, "\"status\":\"error\"") &&
+        response_contains_json_fragment(second, "\"reason\":\"persist_failed\"") &&
+        response_contains_json_fragment(second, "\"previous_index\":\"preserved\"");
+    if (!persist_named && second) {
+        printf("    unexpected response: %.400s\n", second);
+    }
+    free(second);
+    (void)chmod(database, 0644);
+
+    /* The earlier generation still serves. */
+    char *status = srv ? cbm_mcp_handle_tool(srv, "index_status", "{\"project\":\"reason\"}") : NULL;
+    int nodes_after = budget_result_int(status, "nodes");
+    free(status);
+
+    if (srv) {
+        cbm_mcp_server_free(srv);
+    }
+    if (saved_cache_copy) {
+        cbm_setenv("CBM_CACHE_DIR", saved_cache_copy, 1);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    free(saved_cache_copy);
+    th_rmtree(repo);
+    th_rmtree(cache);
+
+    ASSERT_NOT_NULL(srv);
+    ASSERT_TRUE(files_ok);
+    ASSERT_TRUE(discover_named);
+    ASSERT_TRUE(first_indexed);
+    ASSERT_GT(nodes_first, 0);
+    ASSERT_TRUE(locked);
+    ASSERT_TRUE(persist_named);
+    ASSERT_EQ(nodes_after, nodes_first);
+    PASS();
+#endif
+}
+
 TEST(index_repository_max_source_mb_aborts_and_preserves_previous_index) {
 #if !CBM_WITH_ZOVA
     PASS();
@@ -6823,6 +6903,79 @@ static int idxpar_recovery_check(const char *repo_dir) {
 }
 #endif /* !_WIN32 */
 
+/* #160: a worker that crashes with recovery exhausted reports a reason code
+ * and the previous-index state, not only the process outcome. */
+#ifndef _WIN32
+static int idxreason_crash_check(const char *repo_dir) {
+    cbm_index_supervisor_mark_host();
+    cbm_unsetenv("CBM_INDEX_SUPERVISOR");
+    cbm_setenv("CBM_INDEX_MAX_RESTARTS", "0", 1); /* no recovery rounds */
+    cbm_setenv("CBM_INDEX_WORKER_TIMEOUT_S", "30", 1);
+    cbm_setenv("CBM_TEST_CRASH_ON", "idxreason_crasher", 1);
+    char *resp = cbm_mcp_index_run_supervised_path(repo_dir);
+    cbm_unsetenv("CBM_TEST_CRASH_ON");
+    if (!resp) {
+        return 62;
+    }
+    bool named = response_contains_json_fragment(resp, "\"status\":\"error\"") &&
+                 response_contains_json_fragment(resp, "\"reason\":\"worker_crashed\"") &&
+                 response_contains_json_fragment(resp, "\"previous_index\":\"none\"");
+    if (!named) {
+        printf("    unexpected response: %.400s\n", resp);
+    }
+    free(resp);
+    return named ? 0 : 63;
+}
+#endif /* !_WIN32 */
+
+TEST(index_worker_crash_names_reason_and_previous_index) {
+#ifdef _WIN32
+    SKIP_PLATFORM("worker crash guard needs fork isolation (POSIX-only)");
+#else
+    char tmp_dir[CBM_SZ_256];
+    char cache[CBM_SZ_256];
+    snprintf(tmp_dir, sizeof(tmp_dir), "%s/cbm-idxreason-XXXXXX", cbm_tmpdir());
+    snprintf(cache, sizeof(cache), "%s/cbm-idxreason-cache-XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(tmp_dir));
+    ASSERT_NOT_NULL(cbm_mkdtemp(cache));
+    const char *saved_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache_copy = saved_cache ? cbm_strdup(saved_cache) : NULL;
+    cbm_setenv("CBM_CACHE_DIR", cache, 1);
+
+    char crasher[CBM_SZ_512];
+    snprintf(crasher, sizeof(crasher), "%s/idxreason_crasher.py", tmp_dir);
+    FILE *f = fopen(crasher, "w");
+    ASSERT_NOT_NULL(f);
+    fputs("def idxreason_crash_fn():\n    return 'boom'\n", f);
+    fclose(f);
+
+    int code = -1;
+    fflush(NULL);
+    pid_t pid = fork();
+    if (pid == 0) {
+        alarm(120);
+        _exit(idxreason_crash_check(tmp_dir));
+    }
+    ASSERT_TRUE(pid > 0);
+    int status = 0;
+    (void)waitpid(pid, &status, 0);
+    if (WIFEXITED(status)) {
+        code = WEXITSTATUS(status);
+    }
+
+    restore_cache_dir(saved_cache_copy);
+    free(saved_cache_copy);
+    th_rmtree(tmp_dir);
+    th_rmtree(cache);
+
+    if (code != 0) {
+        printf("    child exit code %d (62=null response, 63=reason missing)\n", code);
+    }
+    ASSERT_EQ(code, 0);
+    PASS();
+#endif
+}
+
 TEST(index_recovery_parallel_quarantines_crasher) {
 #ifdef _WIN32
     SKIP_PLATFORM("parallel-recovery guard needs fork isolation (POSIX-only)");
@@ -7553,6 +7706,7 @@ SUITE(mcp) {
     RUN_TEST(index_repository_over_budget_reports_named_reason);
     RUN_TEST(index_repository_max_files_aborts_and_preserves_previous_index);
     RUN_TEST(index_repository_max_source_mb_aborts_and_preserves_previous_index);
+    RUN_TEST(index_repository_failure_names_reason_and_previous_index);
     RUN_TEST(index_supervised_over_budget_passes_worker_response);
     RUN_TEST(search_code_path_filter_prefilter_keeps_matches);
     RUN_TEST(search_code_path_filter_matches_nothing);
@@ -7574,6 +7728,7 @@ SUITE(mcp) {
     RUN_TEST(tool_index_repository_dot_uses_absolute_project_key);
     RUN_TEST(index_supervisor_gate_requires_marked_host_issue845);
     RUN_TEST(index_bg_paths_route_through_supervisor_issue832);
+    RUN_TEST(index_worker_crash_names_reason_and_previous_index);
     RUN_TEST(index_recovery_parallel_quarantines_crasher);
     RUN_TEST(tool_detect_changes_not_found_rich_error);
     RUN_TEST(tool_detect_changes_reports_impacted_symbols);
