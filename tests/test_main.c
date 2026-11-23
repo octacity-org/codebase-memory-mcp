@@ -14,6 +14,7 @@ int tf_tier_excluded_count = 0;
 #include "foundation/compat_fs.h" /* cbm_fopen — worker response file */
 #include "foundation/mem.h"       /* cbm_mem_init — worker budget */
 #include "mcp/index_supervisor.h" /* cbm_index_set_worker_role */
+#include "pipeline/result_spill.h" /* cbm_result_spill_pin_free_bytes_for_tests */
 #include "mcp/mcp.h"              /* cbm_mcp_handle_tool — act as a real worker */
 #include "foundation/subprocess.h" /* cbm_resolve_binary_path — deleted-self probe */
 #include "test_helpers.h"          /* th_rmtree — isolated cache cleanup */
@@ -367,6 +368,11 @@ int main(int argc, char **argv) {
     /* #56: never let a caller's GIT_DIR/GIT_INDEX_FILE/... redirect fixture
      * git commands at the caller's real repository. */
     th_clear_git_repo_env();
+    /* #138: spilling refuses to start below 10 GB of free disk. Tests that
+     * spill must not depend on the machine's disk, so report plenty; the floor
+     * has its own test, which pins a low value. Set before the worker branch
+     * below so a re-executed worker sees it too. */
+    (void)cbm_result_spill_pin_free_bytes_for_tests(UINT64_C(1) << 40);
     /* #798 follow-up: if spawned as the socket-isolation probe, report whether an
      * inheritable socket handle crossed into this child and exit before any suite. */
     int probe_rc = tf_maybe_run_socket_probe(argc, argv);

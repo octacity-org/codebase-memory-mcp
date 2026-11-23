@@ -200,6 +200,11 @@ affected graph, metadata, full-text, and vector rows; unchanged files are not re
 
 Indexing keeps results in memory up to a budget (a fraction of system RAM, or `CBM_MEM_BUDGET_MB`)
 and spills extraction results to disk beyond it, so a large repository does not have to fit in RAM.
+The detected budget is also limited to the memory that is free when the process starts, so a busy
+machine gets a smaller budget; an explicit `CBM_MEM_BUDGET_MB` is used as given. Spilling does not
+start when the cache directory's disk has less than 10 GB free. Spill files are removed when the
+process ends, including when it is killed (on Windows, a killed run's files are removed by the next
+index run).
 When `CBM_MEM_BUDGET_MB` is set explicitly, the same limit also covers the post-extraction phases:
 if the resident graph still exceeds it, indexing stops before publication and the previously
 indexed generation keeps serving. The detected RAM fraction stays advisory after extraction, so a
@@ -465,7 +470,7 @@ codebase-memory-mcp config reset auto_index            # back to the default
 | `CBM_CACHE_DIR` | `~/.cache/codebase-memory-mcp` | Where `cbm.zova` and settings live. |
 | `CBM_ALLOWED_ROOT` | unset | Refuse to index any path that resolves outside this directory. Useful when an untrusted caller drives the server. |
 | `CBM_WORKERS` | detected | Indexing workers. `0` is sequential; `1`–`256` sets the count. |
-| `CBM_MEM_BUDGET_MB` | fraction of RAM | Indexing memory budget in MiB. Beyond it, extraction results spill to disk. An explicit value also stops post-extraction phases before publication; the detected default does not hard-fail after extraction. |
+| `CBM_MEM_BUDGET_MB` | fraction of RAM, limited to free memory | Indexing memory budget in MiB. Beyond it, extraction results spill to disk. An explicit value also stops post-extraction phases before publication; the detected default does not hard-fail after extraction. |
 | `CBM_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error`, or `none`. Logs go to stderr; stdout carries MCP JSON-RPC. |
 | `CBM_DIAGNOSTICS` | off | `1` writes periodic resource snapshots; see [Diagnostics](#diagnostics-and-troubleshooting). |
 | `CBM_DUMP_VERIFY_MIN_RATIO` | `0.5` | If fewer than this fraction of indexed nodes persist, `index_repository` reports `status: "degraded"`. `0` disables the check. |

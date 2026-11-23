@@ -217,6 +217,53 @@ pub export fn cbm_system_info() c.cbm_system_info_t {
     return cached_info;
 }
 
+/// macOS: free + inactive + purgeable pages. Free pages alone would report
+/// pressure on any machine that is merely warm; inactive and purgeable pages
+/// are reclaimed on demand.
+fn availableRamMacos() usize {
+    const host = c.mach_host_self();
+    var page_size: c.vm_size_t = 0;
+    if (c.host_page_size(host, &page_size) != c.KERN_SUCCESS or page_size == 0) return 0;
+    var vm = std.mem.zeroes(c.vm_statistics64_data_t);
+    var count: c.mach_msg_type_number_t = @sizeOf(c.vm_statistics64_data_t) / @sizeOf(c.integer_t);
+    if (c.host_statistics64(host, c.HOST_VM_INFO64, @ptrCast(&vm), &count) != c.KERN_SUCCESS) return 0;
+    const pages: u64 = @as(u64, vm.free_count) + vm.inactive_count + vm.purgeable_count;
+    return @truncate(pages * page_size);
+}
+
+/// Linux: MemAvailable is the kernel's own estimate and counts reclaimable
+/// page cache and slab, which MemFree does not.
+fn availableRamLinux() usize {
+    const f = c.fopen("/proc/meminfo", "re") orelse return 0;
+    defer _ = c.fclose(f);
+    var line: [256]u8 = undefined;
+    const key = "MemAvailable:";
+    while (c.fgets(&line, line.len, f) != null) {
+        const text = std.mem.sliceTo(&line, 0);
+        if (!std.mem.startsWith(u8, text, key)) continue;
+        const digits = std.mem.trim(u8, text[key.len..], " \tkB\r\n");
+        const kb = std.fmt.parseInt(u64, digits, 10) catch return 0;
+        return @truncate(kb *| 1024);
+    }
+    return 0;
+}
+
+fn availableRamWindows() usize {
+    var ms: c.MEMORYSTATUSEX = undefined;
+    ms.dwLength = @sizeOf(c.MEMORYSTATUSEX);
+    if (c.GlobalMemoryStatusEx(&ms) == 0) return 0;
+    return @truncate(ms.ullAvailPhys);
+}
+
+pub export fn cbm_system_available_ram() usize {
+    return switch (os) {
+        .windows => availableRamWindows(),
+        .macos => availableRamMacos(),
+        .netbsd, .freebsd, .openbsd => 0, // unknown rather than guessed
+        else => availableRamLinux(),
+    };
+}
+
 pub export fn cbm_default_worker_count(initial: bool) c_int {
     // CBM_WORKERS env override. Zero means one worker; positive values are
     // accepted in [1, CBM_WORKERS_MAX].

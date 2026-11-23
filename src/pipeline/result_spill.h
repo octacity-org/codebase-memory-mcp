@@ -23,8 +23,19 @@
 typedef struct cbm_result_spill cbm_result_spill_t;
 
 /* One store for one pipeline run with `slots` result slots (one per input
- * file). The file is created lazily on the first park. NULL on OOM. */
+ * file). Opening removes spill files that earlier, killed runs left in `dir`.
+ * The file is created lazily on the first park; on POSIX it is unlinked as
+ * soon as it is open, so it cannot outlive the process. No file is created,
+ * and parking fails, when `dir` has less free space than
+ * cbm_result_spill_free_floor_bytes(). NULL on OOM. */
 cbm_result_spill_t *cbm_result_spill_open(const char *dir, int slots);
+
+/* Free space below which spilling does not start (10 GB). */
+uint64_t cbm_result_spill_free_floor_bytes(void);
+
+/* TEST HOOK: a nonzero value replaces the free space read from the disk; 0
+ * restores the real reading. Returns the previous value. */
+uint64_t cbm_result_spill_pin_free_bytes_for_tests(uint64_t bytes);
 
 /* Encode `result` into slot `slot`, then free it (cbm_free_result). Returns
  * false and leaves the result untouched when encoding or the write fails.

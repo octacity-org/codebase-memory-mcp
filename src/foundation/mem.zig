@@ -95,6 +95,21 @@ pub export fn cbm_mem_ram_fraction_for_total(total_ram_bytes: usize) f64 {
     return RAM_FRACTION_DEFAULT;
 }
 
+// Bounds for the free-memory clamp.
+const AVAIL_HEADROOM_MIN: usize = RAM_BYTES_PER_GB;
+const AVAIL_HEADROOM_MAX: usize = 8 * RAM_BYTES_PER_GB;
+const BUDGET_FLOOR: usize = RAM_BYTES_PER_GB / 2;
+
+/// Total RAM is the ceiling for a budget; what is free right now is the
+/// constraint. A budget sized from total RAM alone plans to use memory that
+/// may already belong to other programs (#138).
+pub export fn cbm_mem_clamp_to_available(budget: usize, available: usize) usize {
+    if (available == 0) return budget;
+    const headroom = std.math.clamp(available / 4, AVAIL_HEADROOM_MIN, AVAIL_HEADROOM_MAX);
+    const cap = @max(available -| headroom, BUDGET_FLOOR);
+    return @min(budget, cap);
+}
+
 pub export fn cbm_mem_init(ram_fraction_in: f64) void {
     if (g_initialized.cmpxchgStrong(0, 1, .seq_cst, .seq_cst) != null) return;
 
@@ -136,19 +151,30 @@ pub export fn cbm_mem_init(ram_fraction_in: f64) void {
             var ovr_mb: [32]u8 = undefined;
             _ = interop.bprint(&ovr_mb, "{d}", .{mb});
             interop.logInfo("mem.init", .{ "budget_mb", cstr(&ovr_mb), "source", "CBM_MEM_BUDGET_MB" });
+            // The user's choice stands, but say so when it exceeds what is free.
+            const free_now = c.cbm_system_available_ram();
+            if (free_now > 0 and g_budget > free_now) {
+                var free_mb: [32]u8 = undefined;
+                _ = interop.bprint(&free_mb, "{d}", .{free_now / MB_DIVISOR});
+                interop.logWarn("mem.budget.over_available", .{ "budget_mb", cstr(&ovr_mb), "available_mb", cstr(&free_mb) });
+            }
             return;
         }
         interop.logWarn("mem.budget.env.invalid", .{ "value", cstr(&env_buf), "fallback", "ram_fraction" });
     }
 
     const info = c.cbm_system_info();
-    g_budget = @intFromFloat(@as(f64, @floatFromInt(info.total_ram)) * ram_fraction);
+    const from_total: usize = @intFromFloat(@as(f64, @floatFromInt(info.total_ram)) * ram_fraction);
+    const available = c.cbm_system_available_ram();
+    g_budget = cbm_mem_clamp_to_available(from_total, available);
 
     var budget_mb: [32]u8 = undefined;
     var ram_mb: [32]u8 = undefined;
+    var avail_mb: [32]u8 = undefined;
     _ = interop.bprint(&budget_mb, "{d}", .{g_budget / MB_DIVISOR});
     _ = interop.bprint(&ram_mb, "{d}", .{info.total_ram / MB_DIVISOR});
-    interop.logInfo("mem.init", .{ "budget_mb", cstr(&budget_mb), "total_ram_mb", cstr(&ram_mb) });
+    _ = interop.bprint(&avail_mb, "{d}", .{available / MB_DIVISOR});
+    interop.logInfo("mem.init", .{ "budget_mb", cstr(&budget_mb), "total_ram_mb", cstr(&ram_mb), "available_mb", cstr(&avail_mb), "source", @as(interop.Str, if (g_budget < from_total) "available_ram" else "ram_fraction") });
 }
 
 pub export fn cbm_mem_rss() usize {

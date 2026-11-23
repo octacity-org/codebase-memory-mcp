@@ -6,6 +6,7 @@
 #include "test_framework.h"
 #include "test_helpers.h"
 #include "../src/foundation/mem.h"
+#include "../src/foundation/platform.h" /* cbm_system_available_ram */
 #include "../src/foundation/arena.h"
 #include "../src/foundation/slab_alloc.h"
 #include "../src/foundation/compat_thread.h"
@@ -171,6 +172,40 @@ TEST(mem_ram_fraction_large_host) {
 }
 
 /* ── RSS tracking tests ───────────────────────────────────────── */
+
+/* #138: the budget is limited to memory that is free right now. */
+TEST(mem_clamp_to_available) {
+    const size_t gb = (size_t)1024 * 1024 * 1024;
+    /* Unknown availability leaves the budget alone. */
+    ASSERT_EQ(cbm_mem_clamp_to_available(8 * gb, 0), 8 * gb);
+    /* Plenty free: unchanged. */
+    ASSERT_EQ(cbm_mem_clamp_to_available(8 * gb, 64 * gb), 8 * gb);
+    /* 4 GB free: a quarter would be 1 GB, the minimum headroom -> 3 GB. */
+    ASSERT_EQ(cbm_mem_clamp_to_available(8 * gb, 4 * gb), 3 * gb);
+    /* 16 GB free: headroom is a quarter (4 GB) -> 12 GB. */
+    ASSERT_EQ(cbm_mem_clamp_to_available(24 * gb, 16 * gb), 12 * gb);
+    /* 64 GB free: headroom stops at 8 GB -> 56 GB. */
+    ASSERT_EQ(cbm_mem_clamp_to_available(60 * gb, 64 * gb), 56 * gb);
+    /* Almost nothing free: never below the 512 MB floor... */
+    ASSERT_EQ(cbm_mem_clamp_to_available(8 * gb, gb / 4), gb / 2);
+    /* ...and the clamp never raises a budget that is already smaller. */
+    ASSERT_EQ(cbm_mem_clamp_to_available(gb / 4, gb / 8), gb / 4);
+    PASS();
+}
+
+TEST(system_available_ram_is_reported) {
+#if defined(__APPLE__) || defined(__linux__) || defined(_WIN32)
+    size_t available = cbm_system_available_ram();
+    ASSERT_GT(available, 0);
+#if !defined(__linux__)
+    /* A Linux cgroup can make total_ram smaller than the host's MemAvailable. */
+    ASSERT_TRUE(available <= cbm_system_info().total_ram);
+#endif
+    PASS();
+#else
+    SKIP_PLATFORM("available memory is not probed on this platform");
+#endif
+}
 
 TEST(mem_rss_positive) {
     cbm_mem_init(0.5);
@@ -1084,6 +1119,8 @@ SUITE(mem) {
     RUN_TEST(mem_ram_fraction_32gb_tier);
     RUN_TEST(mem_ram_fraction_large_host);
     /* RSS tracking */
+    RUN_TEST(mem_clamp_to_available);
+    RUN_TEST(system_available_ram_is_reported);
     RUN_TEST(mem_rss_positive);
     RUN_TEST(mem_peak_rss_gte_rss);
     RUN_TEST(mem_rss_increases_after_alloc);
