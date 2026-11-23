@@ -240,10 +240,22 @@ fn addFailureReason(doc: ?*MutDoc, root: ?*MutVal, reason: Str, before: i64, aft
     _ = c.yyjson_mut_obj_add_str(doc, root, "previous_index", previous);
 }
 
+/// How the last worker of a supervised run ended, kept after its result is freed.
+const WorkerEnd = struct {
+    outcome: c.cbm_proc_outcome_t,
+    exit_code: c_int,
+    pid: c_int,
+
+    fn of(wr: *const c.cbm_index_worker_result_t) WorkerEnd {
+        return .{ .outcome = wr.outcome, .exit_code = wr.exit_code, .pid = wr.pid };
+    }
+};
+
 /// Response for a worker that crashed/hung/failed without producing a
 /// result. The crash is already contained (this process survived); report it
 /// rather than dying.
-fn buildWorkerFailureResponse(args: CStr, outcome: c.cbm_proc_outcome_t, generation_before: i64) HeapStr {
+fn buildWorkerFailureResponse(args: CStr, end: WorkerEnd, generation_before: i64) HeapStr {
+    const outcome = end.outcome;
     const repo_path = mcp.strArg(args, "repo_path");
     defer c.free(repo_path);
     const project = projectNameForArgs(args);
@@ -258,12 +270,23 @@ fn buildWorkerFailureResponse(args: CStr, outcome: c.cbm_proc_outcome_t, generat
     };
     addFailureReason(doc, root, reason, generation_before, servedGeneration(project));
     _ = c.yyjson_mut_obj_add_str(doc, root, "outcome", c.cbm_proc_outcome_str(outcome));
-    _ = c.yyjson_mut_obj_add_str(doc, root, "hint", if (outcome == c.CBM_PROC_HANG)
-        "Indexing worker timed out (a file made no progress). The worker was " ++
-            "terminated and the server survived. Re-run to retry."
-    else
-        "Indexing worker crashed on a file. The crash was contained (the server " ++
+    // Name the worker: with several projects indexing, the outcome alone does
+    // not say which run failed (#152).
+    if (project != null) _ = c.yyjson_mut_obj_add_strcpy(doc, root, "project", project);
+    if (end.pid > 0) _ = c.yyjson_mut_obj_add_int(doc, root, "worker_pid", end.pid);
+    if (outcome == c.CBM_PROC_HANG) {
+        _ = c.yyjson_mut_obj_add_str(doc, root, "hint", "Indexing worker timed out (a file made no progress). The worker was " ++
+            "terminated and the server survived. Re-run to retry.");
+    } else if (outcome == c.CBM_PROC_CLEAN or outcome == c.CBM_PROC_EXIT_NONZERO) {
+        // The worker was not killed: it exited by itself and left no result.
+        var hint: [512]u8 = undefined;
+        _ = c.yyjson_mut_obj_add_int(doc, root, "exit_code", end.exit_code);
+        _ = c.yyjson_mut_obj_add_strcpy(doc, root, "hint", mcp.fmtZ(&hint, "Indexing worker {d} for project '{s}' exited with code {d} without " ++
+            "returning a result. Its log is kept under the cache directory's logs folder.", .{ end.pid, sp(project), end.exit_code }));
+    } else {
+        _ = c.yyjson_mut_obj_add_str(doc, root, "hint", "Indexing worker crashed on a file. The crash was contained (the server " ++
             "survived). Re-run to retry; a future release isolates the culprit file.");
+    }
     if (repo_path != null) _ = c.yyjson_mut_obj_add_strcpy(doc, root, "repo_path", repo_path);
     const json = mcp.docToStr(doc);
     c.yyjson_mut_doc_free(doc);
@@ -423,6 +446,12 @@ fn indexRunSupervisedImpl(srv: ?*Server, args: CStr) HeapStr {
     // transfers the worker's response (the common path); a clean exit with
     // no response degrades to the in-process path.
     if ((wr.outcome == c.CBM_PROC_EXIT_NONZERO and wr.response != null) or wr.outcome == c.CBM_PROC_CLEAN) {
+        if (wr.response == null) {
+            const project = projectNameForArgs(args);
+            defer c.free(project);
+            var pid_buf: [16]u8 = undefined;
+            interop.logWarn("index.supervisor.no_response", .{ "project", @as(CStr, if (project != null) project else "unknown"), "pid", @as(CStr, mcp.fmtZ(&pid_buf, "{d}", .{wr.pid})), "action", "degrade_in_process" });
+        }
         const resp = wr.response;
         wr.response = null;
         c.cbm_index_worker_result_free(&wr);
@@ -436,7 +465,7 @@ fn indexRunSupervisedImpl(srv: ?*Server, args: CStr) HeapStr {
     // CONSECUTIVE failed runs, and only ONE file per round: the OLDEST open S
     // in the intersection. A clean run then indexes the good files and
     // reports the quarantined ones as phase="crash"/"hang" skips.
-    var last_outcome = wr.outcome;
+    var last = WorkerEnd.of(&wr);
     c.cbm_index_worker_result_free(&wr);
 
     var marker_path: [1024]u8 = undefined;
@@ -459,7 +488,7 @@ fn indexRunSupervisedImpl(srv: ?*Server, args: CStr) HeapStr {
         var wr2: c.cbm_index_worker_result_t = undefined;
         const rc2 = c.cbm_index_spawn_worker(args, false, &marker_path, &quarantine_path, &wr2);
         if (rc2 != 0) {
-            last_outcome = wr2.outcome;
+            last = WorkerEnd.of(&wr2);
             c.cbm_index_worker_result_free(&wr2);
             break; // spawn failed mid-recovery — give up
         }
@@ -469,15 +498,15 @@ fn indexRunSupervisedImpl(srv: ?*Server, args: CStr) HeapStr {
             c.cbm_index_worker_result_free(&wr2);
             break; // good files indexed; quarantined files reported as crash/hang
         }
-        last_outcome = wr2.outcome;
+        last = WorkerEnd.of(&wr2);
         c.cbm_index_worker_result_free(&wr2);
-        if (last_outcome != c.CBM_PROC_CRASH and last_outcome != c.CBM_PROC_HANG) {
+        if (last.outcome != c.CBM_PROC_CRASH and last.outcome != c.CBM_PROC_HANG) {
             // SPAWN_FAILED / nonzero exit / non-fault kill → not a crash we
             // can attribute; stop and report a contained failure.
             break;
         }
         // A fault signal → "crash"; a no-progress kill → "hang".
-        const phase: Str = if (last_outcome == c.CBM_PROC_HANG) "hang" else "crash";
+        const phase: Str = if (last.outcome == c.CBM_PROC_HANG) "hang" else "crash";
         var suspects = Suspects.read(&marker_path);
         _ = c.remove(&marker_path); // fresh journal for the next re-run
         if (suspects.paths.items.len == 0) {
@@ -528,13 +557,13 @@ fn indexRunSupervisedImpl(srv: ?*Server, args: CStr) HeapStr {
             resp = wrp.response;
             wrp.response = null;
             var qn: [16]u8 = undefined;
-            interop.log(c.CBM_LOG_ERROR, "index.supervisor.partial", .{ "quarantined", @as(CStr, mcp.fmtZ(&qn, "{d}", .{quarantined})), "outcome", c.cbm_proc_outcome_str(last_outcome) });
+            interop.log(c.CBM_LOG_ERROR, "index.supervisor.partial", .{ "quarantined", @as(CStr, mcp.fmtZ(&qn, "{d}", .{quarantined})), "outcome", c.cbm_proc_outcome_str(last.outcome) });
         }
         c.cbm_index_worker_result_free(&wrp);
     }
 
     if (resp != null) return resp;
-    return buildWorkerFailureResponse(args, last_outcome, generation_before);
+    return buildWorkerFailureResponse(args, last, generation_before);
 }
 
 // ── Index job queue ──────────────────────────────────────────────

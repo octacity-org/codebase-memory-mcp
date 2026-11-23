@@ -254,6 +254,7 @@ fn runWin(opts: *const c.cbm_proc_opts_t, out: *c.cbm_proc_result_t) c_int {
     c.free(wcmd);
     if (hlog != interop.INVALID_HANDLE_VALUE) _ = c.CloseHandle(hlog);
     if (ok == 0) return spawnFailed(out);
+    out.pid = @bitCast(@as(c_uint, @truncate(pi.dwProcessId)));
 
     var tail_pos: c_long = 0;
     const started = c.cbm_now_ms();
@@ -385,6 +386,7 @@ fn runPosix(opts: *const c.cbm_proc_opts_t, out: *c.cbm_proc_result_t) c_int {
             _ = c.setpgid(pid, pid);
         }
     }
+    out.pid = @intCast(pid);
     const kill_target: c.pid_t = if (opts.own_process_group) -pid else pid;
 
     var tail_pos: c_long = 0;
@@ -439,6 +441,7 @@ pub export fn cbm_subprocess_run(opts: ?*const c.cbm_proc_opts_t, out_in: ?*c.cb
     out.outcome = c.CBM_PROC_SPAWN_FAILED;
     out.exit_code = -1;
     out.term_signal = 0;
+    out.pid = 0;
     const o = opts orelse return -1;
     if (o.bin == null or o.bin[0] == 0) return -1;
     return if (is_windows) runWin(o, out) else runPosix(o, out);

@@ -131,6 +131,7 @@ pub export fn cbm_index_spawn_worker(args_json: [*c]const u8, single_thread: boo
     result.*.outcome = c.CBM_PROC_SPAWN_FAILED;
     result.*.exit_code = -1;
     result.*.term_signal = 0;
+    result.*.pid = 0;
     result.*.response = null;
 
     var self = std.mem.zeroes([1024]u8);
@@ -203,6 +204,7 @@ pub export fn cbm_index_spawn_worker(args_json: [*c]const u8, single_thread: boo
     result.*.outcome = r.outcome;
     result.*.exit_code = r.exit_code;
     result.*.term_signal = r.term_signal;
+    result.*.pid = r.pid;
     // A graceful nonzero exit (an isError result, e.g. over the memory budget)
     // also leaves its response behind; the supervisor passes it through.
     if (r.outcome == c.CBM_PROC_CLEAN or r.outcome == c.CBM_PROC_EXIT_NONZERO) {
@@ -212,10 +214,12 @@ pub export fn cbm_index_spawn_worker(args_json: [*c]const u8, single_thread: boo
 
     var sig: [16]u8 = undefined;
     var exit_buf: [16]u8 = undefined;
+    var pid_buf: [16]u8 = undefined;
     _ = interop.bprint(&sig, "{d}", .{r.term_signal});
     _ = interop.bprint(&exit_buf, "{d}", .{r.exit_code});
+    _ = interop.bprint(&pid_buf, "{d}", .{r.pid});
     const outcome = c.cbm_proc_outcome_str(r.outcome);
-    interop.logInfo("index.supervisor.reap", .{ "outcome", outcome, "exit_code", @as(CStr, &exit_buf), "signal", @as(CStr, &sig) });
+    interop.logInfo("index.supervisor.reap", .{ "pid", @as(CStr, &pid_buf), "outcome", outcome, "exit_code", @as(CStr, &exit_buf), "signal", @as(CStr, &sig) });
 
     // Observability: on a CLEAN run the worker log is noise → delete it. On
     // ANY failure keep it and surface its path + raw exit code, so the
@@ -225,12 +229,16 @@ pub export fn cbm_index_spawn_worker(args_json: [*c]const u8, single_thread: boo
     // Exception: under CBM_PROFILE the log IS the deliverable — the worker's
     // msg=prof pass/sub-phase report is only written there, and deleting it
     // on success made profiling clean runs impossible. Keep it and say where.
-    if (r.outcome == c.CBM_PROC_CLEAN and !c.cbm_profile_active) {
+    //
+    // A worker that exited cleanly but left no response is a failure too: its
+    // log is the only record of the run, so it is kept and named (#152).
+    const clean = r.outcome == c.CBM_PROC_CLEAN and result.*.response != null;
+    if (clean and !c.cbm_profile_active) {
         _ = c.remove(&log_path);
-    } else if (r.outcome == c.CBM_PROC_CLEAN) {
+    } else if (clean) {
         interop.logInfo("index.supervisor.profile_log", .{ "log", @as(CStr, &log_path) });
     } else {
-        interop.logWarn("index.supervisor.worker_failed", .{ "outcome", outcome, "exit_code", @as(CStr, &exit_buf), "log", @as(CStr, &log_path) });
+        interop.logWarn("index.supervisor.worker_failed", .{ "pid", @as(CStr, &pid_buf), "outcome", outcome, "exit_code", @as(CStr, &exit_buf), "log", @as(CStr, &log_path) });
     }
     return 0;
 }

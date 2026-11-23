@@ -119,6 +119,7 @@ TEST(subprocess_run_exit_nonzero) {
     cbm_proc_result_t r = run_sh("exit 7", 0);
     ASSERT_EQ(r.outcome, CBM_PROC_EXIT_NONZERO);
     ASSERT_EQ(r.exit_code, 7);
+    ASSERT_GT(r.pid, 0); /* the child is identifiable after it exits (#152) */
     PASS();
 #endif
 }
