@@ -239,9 +239,19 @@ fn handleDetectChanges(srv: *Server, args: CStr) HeapStr {
 
     const store = mcp.resolveStore(srv, project);
 
+    // The same file can arrive from more than one source, and `sort -u` cannot
+    // merge them: status prints " M path" where diff prints "path". Paths
+    // already reported are skipped after the prefix is stripped (#184).
+    const gpa = std.heap.c_allocator;
+    var seen: std.ArrayList([]u8) = .empty;
+    defer {
+        for (seen.items) |p| gpa.free(p);
+        seen.deinit(gpa);
+    }
+
     var line: [1024]u8 = undefined;
     var file_count: c_int = 0;
-    while (c.fgets(&line, line.len, fp) != null) {
+    read_lines: while (c.fgets(&line, line.len, fp) != null) {
         const s = trimLineEnd(mcp.bufStr(&line));
         if (s.len == 0) continue;
         line[s.len] = 0;
@@ -258,6 +268,12 @@ fn handleDetectChanges(srv: *Server, args: CStr) HeapStr {
         }
         if (std.mem.startsWith(u8, s[start..], prefix)) start += prefix.len;
         if (start >= s.len) continue;
+        for (seen.items) |p| {
+            if (std.mem.eql(u8, p, s[start..])) continue :read_lines;
+        }
+        if (gpa.dupe(u8, s[start..])) |copy| {
+            seen.append(gpa, copy) catch gpa.free(copy);
+        } else |_| {}
         const path_line: [*c]const u8 = &line[start];
 
         _ = c.yyjson_mut_arr_add_strcpy(doc, changed, path_line);

@@ -5403,6 +5403,8 @@ TEST(tool_detect_changes_project_in_repository_subdirectory) {
     ASSERT_NOT_NULL(text);
     ASSERT_NOT_NULL(strstr(text, "\"handler.go\""));
     ASSERT_NOT_NULL(strstr(text, "\"added.go\""));
+    /* #184: handler.go comes from both diff and status; it is counted once. */
+    ASSERT_NOT_NULL(strstr(text, "\"changed_count\":2"));
     free(text);
     ASSERT_NULL(strstr(resp, "app/"));
     ASSERT_NULL(strstr(resp, "outside.go"));
