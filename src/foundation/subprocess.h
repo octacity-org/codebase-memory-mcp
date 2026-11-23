@@ -38,6 +38,7 @@ typedef struct {
     cbm_proc_outcome_t outcome;
     int exit_code;   /* WEXITSTATUS / GetExitCodeProcess; -1 when terminated by a POSIX signal */
     int term_signal; /* WTERMSIG on POSIX; 0 otherwise */
+    int pid;         /* the child's process id; 0 when no child ran */
 } cbm_proc_result_t;
 
 /* Called for each newly-completed (newline-terminated) log line while the child

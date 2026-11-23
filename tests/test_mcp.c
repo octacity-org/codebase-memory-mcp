@@ -7198,7 +7198,10 @@ static int idxreason_crash_check(const char *repo_dir) {
     }
     bool named = response_contains_json_fragment(resp, "\"status\":\"error\"") &&
                  response_contains_json_fragment(resp, "\"reason\":\"worker_crashed\"") &&
-                 response_contains_json_fragment(resp, "\"previous_index\":\"none\"");
+                 response_contains_json_fragment(resp, "\"previous_index\":\"none\"") &&
+                 /* #152: the failure names the worker. */
+                 response_contains_json_fragment(resp, "\"project\":\"") &&
+                 response_contains_json_fragment(resp, "\"worker_pid\":");
     if (!named) {
         printf("    unexpected response: %.400s\n", resp);
     }

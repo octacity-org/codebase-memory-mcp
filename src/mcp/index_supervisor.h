@@ -62,6 +62,7 @@ typedef struct {
     cbm_proc_outcome_t outcome; /* how the worker ended */
     int exit_code;              /* worker exit code (-1 if signalled) */
     int term_signal;            /* POSIX terminating signal, else 0 */
+    int pid;                    /* worker process id; 0 if no worker ran */
     char *response; /* worker's result string on CLEAN or EXIT_NONZERO exit (caller frees) */
 } cbm_index_worker_result_t;
 
