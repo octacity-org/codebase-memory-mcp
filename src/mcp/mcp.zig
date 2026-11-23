@@ -735,8 +735,11 @@ pub export fn cbm_mcp_get_int_arg(args_json: [*c]const u8, key: [*c]const u8, de
     const doc = readJson(args_json) orelse return default_val;
     defer c.yyjson_doc_free(doc);
     const val = c.yyjson_obj_get(c.yyjson_doc_get_root(doc), key);
-    // The C took yyjson_get_int's int and truncated nothing; keep its value.
-    return if (val != null and c.yyjson_is_int(val)) c.yyjson_get_int(val) else default_val;
+    if (val == null or !c.yyjson_is_int(val)) return default_val;
+    // Read the full 64-bit value and fall back to the default when it does not
+    // fit an int. yyjson_get_int casts first, so 4294967297 became 1 (#128).
+    if (c.yyjson_is_sint(val)) return std.math.cast(c_int, c.yyjson_get_sint(val)) orelse default_val;
+    return std.math.cast(c_int, c.yyjson_get_uint(val)) orelse default_val;
 }
 
 pub export fn cbm_mcp_get_bool_arg(args_json: [*c]const u8, key: [*c]const u8) bool {

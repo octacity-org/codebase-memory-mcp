@@ -78,7 +78,12 @@ fn compareParseBoundedInteger(root: ?*Val, key: Str, default_value: i64, maximum
             err.* = "limit values must be integers";
             return false;
         }
-        parsed = c.yyjson_get_int(value);
+        // Read the full 64-bit value: yyjson_get_int casts to int first, so
+        // 4294967297 became 1 and passed the range check below (#128).
+        parsed = if (c.yyjson_is_sint(value))
+            c.yyjson_get_sint(value)
+        else
+            (std.math.cast(i64, c.yyjson_get_uint(value)) orelse std.math.maxInt(i64));
     }
     if (parsed < 1 or parsed > maximum) {
         err.* = if (mcp.eql(std.mem.span(key), "limit")) "limit must be between 1 and 1000" else "scan_limit must be between 1 and 10000000";

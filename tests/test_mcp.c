@@ -1014,6 +1014,11 @@ TEST(tool_compare_graphs_validates_arguments) {
          "limit must be between 1 and 1000"},
         {"{\"base_project\":\"a\",\"target_project\":\"b\",\"limit\":\"5\"}",
          "limit values must be integers"},
+        /* #128: these wrapped to 1 and -1 before the range check. */
+        {"{\"base_project\":\"a\",\"target_project\":\"b\",\"limit\":4294967297}",
+         "limit must be between 1 and 1000"},
+        {"{\"base_project\":\"a\",\"target_project\":\"b\",\"limit\":18446744073709551615}",
+         "limit must be between 1 and 1000"},
         {"{\"base_project\":\"a\",\"target_project\":\"b\",\"scan_limit\":0}",
          "scan_limit must be between 1 and 10000000"},
         {"{\"base_project\":\"a\",\"target_project\":\"b\"}", "project_not_indexed"},
@@ -6349,6 +6354,26 @@ TEST(mcp_get_int_arg_bool_value) {
     PASS();
 }
 
+TEST(mcp_get_int_arg_out_of_range) {
+    /* A JSON integer wider than int must fall back to the default instead of
+     * wrapping: 4294967297 used to become 1 and 2147483648 became negative. */
+    int val = cbm_mcp_get_int_arg("{\"limit\":4294967297}", "limit", 7);
+    ASSERT_EQ(val, 7);
+    val = cbm_mcp_get_int_arg("{\"limit\":2147483648}", "limit", 7);
+    ASSERT_EQ(val, 7);
+    val = cbm_mcp_get_int_arg("{\"limit\":-2147483649}", "limit", 7);
+    ASSERT_EQ(val, 7);
+    /* Above INT64_MAX the value is unsigned; read as signed it would be -1. */
+    val = cbm_mcp_get_int_arg("{\"limit\":18446744073709551615}", "limit", 7);
+    ASSERT_EQ(val, 7);
+    /* In-range boundaries are still accepted. */
+    val = cbm_mcp_get_int_arg("{\"limit\":2147483647}", "limit", 7);
+    ASSERT_EQ(val, 2147483647);
+    val = cbm_mcp_get_int_arg("{\"limit\":-2147483648}", "limit", 7);
+    ASSERT_EQ(val, -2147483648);
+    PASS();
+}
+
 TEST(mcp_get_bool_arg_empty_json) {
     bool val = cbm_mcp_get_bool_arg("", "key");
     ASSERT_FALSE(val);
@@ -7873,6 +7898,7 @@ SUITE(mcp) {
     RUN_TEST(mcp_get_int_arg_empty_json);
     RUN_TEST(mcp_get_int_arg_string_value);
     RUN_TEST(mcp_get_int_arg_bool_value);
+    RUN_TEST(mcp_get_int_arg_out_of_range);
     RUN_TEST(mcp_get_bool_arg_empty_json);
     RUN_TEST(mcp_get_bool_arg_int_value);
     RUN_TEST(mcp_get_tool_name_empty_json);
