@@ -6,6 +6,7 @@
  */
 #include "../src/foundation/compat.h"
 #include "foundation/platform.h" // cbm_normalize_path_sep (drive-canonicalization regression)
+#include "foundation/compat_fs.h" // cbm_opendir (spill directory checks)
 #include "test_framework.h"
 #include "test_helpers.h"
 #include "foundation/mem.h" // cbm_mem_init/budget (back-pressure futile-nap test)
@@ -11482,6 +11483,111 @@ TEST(result_spill_store_parks_and_loads) {
     PASS();
 }
 
+/* Number of spill-*.bin entries in dir. */
+static int spill_files_in(const char *dir) {
+    cbm_dir_t *d = cbm_opendir(dir);
+    if (!d) {
+        return -1;
+    }
+    int n = 0;
+    cbm_dirent_t *e;
+    while ((e = cbm_readdir(d)) != NULL) {
+        if (strncmp(e->name, "spill-", 6) == 0) {
+            n++;
+        }
+    }
+    cbm_closedir(d);
+    return n;
+}
+
+/* #138: on POSIX the spill file has no name while it is open, so a killed
+ * process cannot leave it behind; the data is still readable. */
+TEST(result_spill_file_is_unlinked_while_open) {
+#ifdef _WIN32
+    SKIP_PLATFORM("Windows cannot unlink an open file; it relies on the sweep");
+#else
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s/cbm_spill_XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(dir));
+    cbm_result_spill_t *sp = cbm_result_spill_open(dir, 1);
+    ASSERT_NOT_NULL(sp);
+    CBMFileResult *r = spill_extract(0);
+    ASSERT_NOT_NULL(r);
+    bool parked = cbm_result_spill_park(sp, 0, r);
+    if (!parked) {
+        cbm_free_result(r);
+    }
+    int named = spill_files_in(dir);
+    CBMFileResult *loaded = parked ? cbm_result_spill_load(sp, 0) : NULL;
+    bool readable = loaded != NULL;
+    cbm_free_result(loaded);
+    cbm_result_spill_close(sp);
+    rmdir(dir);
+    ASSERT_TRUE(parked);
+    ASSERT_EQ(named, 0);
+    ASSERT_TRUE(readable);
+    PASS();
+#endif
+}
+
+/* #138: below the free-disk floor nothing is written and parking fails, so
+ * the caller stays on its in-memory path. */
+TEST(result_spill_refuses_below_free_disk_floor) {
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s/cbm_spill_XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(dir));
+    uint64_t floor_bytes = cbm_result_spill_free_floor_bytes();
+    uint64_t saved = cbm_result_spill_pin_free_bytes_for_tests(floor_bytes - 1);
+    cbm_result_spill_t *sp = cbm_result_spill_open(dir, 1);
+    CBMFileResult *r = spill_extract(0);
+    bool parked = sp && r && cbm_result_spill_park(sp, 0, r);
+    if (!parked) {
+        cbm_free_result(r); /* a refused park leaves the result with the caller */
+    }
+    int named = spill_files_in(dir);
+    /* At the floor exactly, spilling is allowed. */
+    (void)cbm_result_spill_pin_free_bytes_for_tests(floor_bytes);
+    cbm_result_spill_t *sp2 = cbm_result_spill_open(dir, 1);
+    CBMFileResult *r2 = spill_extract(0);
+    bool parked_at_floor = sp2 && r2 && cbm_result_spill_park(sp2, 0, r2);
+    if (!parked_at_floor) {
+        cbm_free_result(r2);
+    }
+    (void)cbm_result_spill_pin_free_bytes_for_tests(saved);
+    cbm_result_spill_close(sp);
+    cbm_result_spill_close(sp2);
+    rmdir(dir);
+    ASSERT_NOT_NULL(sp);
+    ASSERT_FALSE(parked);
+    ASSERT_EQ(named, 0);
+    ASSERT_TRUE(parked_at_floor);
+    PASS();
+}
+
+/* #138: opening a store removes spill files a killed run left behind, and
+ * nothing else in the directory. */
+TEST(result_spill_open_sweeps_orphans) {
+    char dir[512];
+    snprintf(dir, sizeof(dir), "%s/cbm_spill_XXXXXX", cbm_tmpdir());
+    ASSERT_NOT_NULL(cbm_mkdtemp(dir));
+    char orphan[600];
+    char other[600];
+    snprintf(orphan, sizeof(orphan), "%s/spill-999999-0.bin", dir);
+    snprintf(other, sizeof(other), "%s/keep.txt", dir);
+    ASSERT_EQ(th_write_file(orphan, "left behind"), 0);
+    ASSERT_EQ(th_write_file(other, "not a spill file"), 0);
+    cbm_result_spill_t *sp = cbm_result_spill_open(dir, 1);
+    int named = spill_files_in(dir);
+    bool other_kept = access(other, F_OK) == 0;
+    cbm_result_spill_close(sp);
+    cbm_unlink(other);
+    rmdir(dir);
+    ASSERT_NOT_NULL(sp);
+    ASSERT_EQ(named, 0);
+    ASSERT_TRUE(other_kept);
+    PASS();
+}
+
 #if CBM_WITH_ZOVA
 /* 61 files across Go, Python, Java (no package line, so the JVM namespace is
  * inferred from the source root), TypeScript, Rust and YAML, with
@@ -12145,6 +12251,9 @@ SUITE(pipeline) {
     RUN_TEST(result_spill_round_trip_is_byte_identical);
     RUN_TEST(result_spill_decode_rejects_truncated_buffers);
     RUN_TEST(result_spill_store_parks_and_loads);
+    RUN_TEST(result_spill_file_is_unlinked_while_open);
+    RUN_TEST(result_spill_refuses_below_free_disk_floor);
+    RUN_TEST(result_spill_open_sweeps_orphans);
     RUN_TEST(pipeline_forced_spill_matches_in_memory_graph);
     /* Cross-LSP shared registry (ms-typescript quadratic) */
     RUN_TEST(pipeline_ts_cross_uses_shared_registry);

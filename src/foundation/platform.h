@@ -109,6 +109,10 @@ typedef struct {
 /* Query system information. Results are cached after first call. */
 cbm_system_info_t cbm_system_info(void);
 
+/* Physical memory that is free or reclaimable right now, in bytes. Read on
+ * every call. 0 when the platform cannot say (BSD, or a failed query). */
+size_t cbm_system_available_ram(void);
+
 /* Recommended worker count for parallel indexing.
  * initial=true:  all cores (user is waiting for initial index)
  * initial=false: max(1, perf_cores-1) (leave headroom for user apps) */

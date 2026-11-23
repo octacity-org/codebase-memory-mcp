@@ -14,7 +14,15 @@
 /* Tiered default fraction for MCP startup: 25% on <=16GB, 35% on <=32GB, else 50%. */
 double cbm_mem_ram_fraction_for_total(size_t total_ram_bytes);
 
-/* Initialize memory budget = ram_fraction * total_physical_ram.
+/* Limit a budget derived from total RAM to what is free right now. A quarter
+ * of `available` (held between 1 and 8 GB) is left as headroom for the OS and
+ * other programs. The result is never clamped below 512 MB, and never raised
+ * above `budget`. available == 0 means unknown and returns `budget`. */
+size_t cbm_mem_clamp_to_available(size_t budget, size_t available);
+
+/* Initialize memory budget = ram_fraction * total_physical_ram, limited to the
+ * memory that is free at the time (cbm_mem_clamp_to_available). An explicit
+ * CBM_MEM_BUDGET_MB is used as given.
  * Thread-safe: only the first call takes effect.
  * Configures mimalloc options for reduced upfront memory. */
 void cbm_mem_init(double ram_fraction);

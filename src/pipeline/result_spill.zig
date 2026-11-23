@@ -447,6 +447,7 @@ const Spill = struct {
     path: [1024]u8,
     file: ?*c.FILE, // opened on the first park
     open_failed: bool,
+    unlinked: bool, // already removed while open (POSIX); close must not retry
     end: i64,
     mu: c.cbm_mutex_t,
     slots: [*]SpillSlot,
@@ -470,6 +471,63 @@ fn spillFseek(file: ?*c.FILE, offset: i64, whence: c_int) c_int {
 
 var sequence: std.atomic.Value(c_int) = .init(0);
 
+/// Below this much free space spilling does not start: filling the disk breaks
+/// everything else on the machine, which is worse than the memory pressure the
+/// spill would relieve.
+const SPILL_FREE_FLOOR: u64 = 10 * 1024 * 1024 * 1024;
+
+/// Test seam: a nonzero value replaces the free space read from the disk.
+var free_bytes_pin: std.atomic.Value(u64) = .init(0);
+
+pub export fn cbm_result_spill_pin_free_bytes_for_tests(bytes: u64) u64 {
+    return free_bytes_pin.swap(bytes, .seq_cst);
+}
+
+pub export fn cbm_result_spill_free_floor_bytes() u64 {
+    return SPILL_FREE_FLOOR;
+}
+
+/// Bytes available to this user on the filesystem holding `dir`; 0 when the
+/// platform cannot say.
+fn spillFreeBytes(dir: CStr) u64 {
+    const pinned = free_bytes_pin.load(.seq_cst);
+    if (pinned > 0) return pinned;
+    if (is_windows) {
+        var available = std.mem.zeroes(c.ULARGE_INTEGER);
+        if (c.GetDiskFreeSpaceExA(dir, &available, null, null) == 0) return 0;
+        return available.QuadPart;
+    }
+    var filesystem = std.mem.zeroes(c.struct_statvfs);
+    if (c.statvfs(dir, &filesystem) != 0) return 0;
+    const fragment_size: u64 = if (filesystem.f_frsize != 0) filesystem.f_frsize else filesystem.f_bsize;
+    return @as(u64, filesystem.f_bavail) *| fragment_size;
+}
+
+/// Remove spill files left by runs that are gone. Only files this module names
+/// (spill-<pid>-<n>.bin) are touched. A run killed outright runs no cleanup;
+/// on Windows its file survives, and on POSIX so do files written before the
+/// unlink-at-open below existed. Deleting is the liveness test on Windows: an
+/// open file refuses, so a concurrent run keeps its spill. On POSIX a
+/// concurrent run still reads its file through the handle it holds.
+fn spillSweepOrphans(dir: CStr) void {
+    const d = c.cbm_opendir(dir) orelse return;
+    var removed: c_int = 0;
+    while (c.cbm_readdir(d)) |entry| {
+        const name = std.mem.sliceTo(&entry.*.name, 0);
+        if (!std.mem.startsWith(u8, name, "spill-") or !std.mem.endsWith(u8, name, ".bin")) continue;
+        var path: [1024]u8 = undefined;
+        const n = c.snprintf(&path, path.len, "%s/%s", dir, @as(CStr, &entry.*.name));
+        if (n < 0 or @as(usize, @intCast(n)) >= path.len) continue;
+        if (c.cbm_unlink(&path) == 0) removed += 1;
+    }
+    c.cbm_closedir(d);
+    if (removed > 0) {
+        var count: [16]u8 = undefined;
+        _ = c.snprintf(&count, count.len, "%d", removed);
+        interop.logInfo("mem.spill.orphans_removed", .{ @as(CStr, "count"), @as(CStr, &count), @as(CStr, "dir"), dir });
+    }
+}
+
 pub export fn cbm_result_spill_open(dir: CStr, slots: c_int) ?*Spill {
     if (dir == null or slots <= 0) return null;
     const sp: ?*Spill = interop.callocN(Spill, 1);
@@ -492,6 +550,7 @@ pub export fn cbm_result_spill_open(dir: CStr, slots: c_int) ?*Spill {
         c.free(@ptrCast(table));
         return null;
     }
+    spillSweepOrphans(dir);
     for (table.?[0..ix(slots)]) |*slot| slot.offset = -1;
     sp.?.slots = table.?;
     sp.?.slot_count = slots;
@@ -509,12 +568,30 @@ fn spillEnsureFile(sp: *Spill) bool {
         slash[0] = 0;
         _ = c.cbm_mkdir_p(&dir, 0o700);
     }
+    // Ask the disk before trading memory for it. Refusing leaves the caller in
+    // the memory path it was already in (back-pressure, then its own budget
+    // decision): the same outcome as a disk that fills mid-run, minus the
+    // filled disk. Unknown free space (0) does not refuse.
+    const free_bytes = spillFreeBytes(&dir);
+    if (free_bytes > 0 and free_bytes < SPILL_FREE_FLOOR) {
+        sp.open_failed = true;
+        var free_mb: [32]u8 = undefined;
+        _ = c.snprintf(&free_mb, free_mb.len, "%llu", @as(c_ulonglong, free_bytes / (1024 * 1024)));
+        interop.logWarn("mem.spill.refused", .{ @as(CStr, "reason"), @as(CStr, "low_disk"), @as(CStr, "free_mb"), @as(CStr, &free_mb) });
+        return false;
+    }
     sp.file = c.cbm_fopen(&sp.path, "w+b");
     if (sp.file == null) {
         sp.open_failed = true;
         interop.logWarn("mem.spill.open_failed", .{ @as(CStr, "path"), @as(CStr, &sp.path) });
+        return false;
     }
-    return sp.file != null;
+    // Unlink while the file is open: the data stays reachable through this
+    // handle and the space comes back the moment the process ends, whether by
+    // a clean exit, an abort or a SIGKILL. Windows refuses to unlink an open
+    // file, so it keeps the unlink at close and relies on the sweep at open.
+    if (!is_windows and c.cbm_unlink(&sp.path) == 0) sp.unlinked = true;
+    return true;
 }
 
 pub export fn cbm_result_spill_park(sp_c: ?*Spill, slot: c_int, result_c: ?*FileResult) bool {
@@ -599,7 +676,7 @@ pub export fn cbm_result_spill_close(sp_c: ?*Spill) void {
     const sp = sp_c orelse return;
     if (sp.file != null) {
         _ = c.fclose(sp.file);
-        _ = c.cbm_unlink(&sp.path);
+        if (!sp.unlinked) _ = c.cbm_unlink(&sp.path);
     }
     c.cbm_mutex_destroy(&sp.mu);
     c.free(@ptrCast(sp.slots));
