@@ -674,7 +674,7 @@ TEST(lang_res_binary_resource_unsupported) {
                                                'y',  'M',  'e',  's',  'h',  0x00, 0xff, 0x80};
     char path[256];
     snprintf(path, sizeof(path), "%s/test_lang_godot.res", cbm_tmpdir());
-    FILE *f = cbm_fopen(path, "wb");
+    FILE *f = fopen(path, "wb");
     ASSERT_NOT_NULL(f);
     ASSERT_EQ(fwrite(godot_head, 1, sizeof(godot_head), f), sizeof(godot_head));
     fclose(f);
