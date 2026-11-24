@@ -1205,10 +1205,11 @@ pub export fn cbm_cmd_uninstall(argc: c_int, argv: [*c][*c]u8) c_int {
         }
 
         if (!delete_indexes) {
-            const cache_dir = c.cbm_resolve_cache_dir();
+            const cache_c = c.cbm_resolve_cache_dir();
+            const cache_dir: [*c]const u8 = if (cache_c) |dir| dir else "the cache directory";
             _ = c.printf(
                 "Indexes kept in %s. To remove them, uninstall with --delete-indexes or delete the files there.\n",
-                if (cache_dir != null) cache_dir else "the cache directory",
+                cache_dir,
             );
         } else if (dry_run) {
             _ = c.printf("(dry-run — %d index(es) would be deleted)\n", index_count);
