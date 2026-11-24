@@ -2386,6 +2386,66 @@ TEST(cli_upsert_codex_mcp_replace) {
     PASS();
 }
 
+TEST(cli_upsert_codex_mcp_quoted_and_whitespace) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-codex-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char configpath[512];
+    snprintf(configpath, sizeof(configpath), "%s/config.toml", tmpdir);
+
+    /* 1. Quoted key: [mcp_servers."codebase-memory-mcp"] */
+    write_test_file(configpath, "model = \"gpt-4\"\n\n"
+                                "[mcp_servers.\"codebase-memory-mcp\"]\n"
+                                "command = \"/old/path/codebase-memory-mcp\"\n"
+                                "env_vars = [\"CBM_CACHE_DIR\"]\n\n"
+                                "[other_setting]\nfoo = \"bar\"\n");
+
+    int rc = cbm_upsert_codex_mcp("/new/path/codebase-memory-mcp", configpath);
+    ASSERT_EQ(rc, 0);
+
+    const char *data = read_test_file(configpath);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "/old/path") == NULL);
+    ASSERT(strstr(data, "/new/path/codebase-memory-mcp") != NULL);
+    ASSERT(strstr(data, "[other_setting]") != NULL);
+    ASSERT(strstr(data, "model = \"gpt-4\"") != NULL);
+
+    /* Ensure there is only 1 table and not duplicate */
+    int count = 0;
+    const char *p = data;
+    while ((p = strstr(p, "codebase-memory-mcp")) != NULL) {
+        count++;
+        p += strlen("codebase-memory-mcp");
+    }
+    ASSERT_EQ(count, 2);
+
+    /* 2. Remove the table */
+    rc = cbm_remove_codex_mcp(configpath);
+    ASSERT_EQ(rc, 0);
+    data = read_test_file(configpath);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "codebase-memory-mcp") == NULL);
+    ASSERT(strstr(data, "[other_setting]") != NULL);
+    ASSERT(strstr(data, "model = \"gpt-4\"") != NULL);
+
+    /* 3. Whitespace and single-quote variation */
+    write_test_file(configpath, "[ mcp_servers . 'codebase-memory-mcp' ]\n"
+                                "command = \"/old2/path\"\n\n"
+                                "[other_setting]\nfoo = \"bar\"\n");
+    rc = cbm_upsert_codex_mcp("/new2/path/codebase-memory-mcp", configpath);
+    ASSERT_EQ(rc, 0);
+    data = read_test_file(configpath);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "/old2/path") == NULL);
+    ASSERT(strstr(data, "/new2/path/codebase-memory-mcp") != NULL);
+    ASSERT(strstr(data, "[other_setting]") != NULL);
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  *  Group B: MCP Config Upsert — Zed (corrected format)
  * ═══════════════════════════════════════════════════════════════════ */
@@ -3972,10 +4032,11 @@ SUITE(cli) {
     RUN_TEST(cli_detect_agents_finds_junie_issue651);
     RUN_TEST(cli_detect_agents_none_found);
 
-    /* Codex MCP config upsert (3 tests — group B) */
+    /* Codex MCP config upsert (4 tests — group B) */
     RUN_TEST(cli_upsert_codex_mcp_fresh);
     RUN_TEST(cli_upsert_codex_mcp_existing);
     RUN_TEST(cli_upsert_codex_mcp_replace);
+    RUN_TEST(cli_upsert_codex_mcp_quoted_and_whitespace);
 
     /* Zed MCP format fix (1 test — group B) */
     RUN_TEST(cli_zed_mcp_uses_args_format);

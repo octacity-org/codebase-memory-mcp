@@ -1055,11 +1055,95 @@ pub export fn cbm_remove_instructions(path: [*c]const u8) c_int {
 
 const CODEX_CMM_SECTION = "[mcp_servers.codebase-memory-mcp]";
 
-/// The span of our Codex TOML section: from its header to the next "[" line
+const CodexSectionSpan = struct {
+    start: usize,
+    header_end: usize,
+};
+
+fn isCodexMcpHeaderLine(line: []const u8) bool {
+    var p: usize = 0;
+    while (p < line.len and (line[p] == ' ' or line[p] == '\t')) : (p += 1) {}
+    if (p >= line.len or line[p] != '[') return false;
+    p += 1;
+    if (p < line.len and line[p] == '[') return false; // not [[array of tables]]
+
+    // First key component: "mcp_servers"
+    while (p < line.len and (line[p] == ' ' or line[p] == '\t')) : (p += 1) {}
+    if (p >= line.len) return false;
+
+    if (line[p] == '"' or line[p] == '\'') {
+        const quote = line[p];
+        p += 1;
+        const key_start = p;
+        while (p < line.len and line[p] != quote) : (p += 1) {}
+        if (p >= line.len) return false;
+        if (!eql(line[key_start..p], "mcp_servers")) return false;
+        p += 1;
+    } else {
+        const key_start = p;
+        while (p < line.len and line[p] != '.' and line[p] != ' ' and line[p] != '\t' and line[p] != ']') : (p += 1) {}
+        if (!eql(line[key_start..p], "mcp_servers")) return false;
+    }
+
+    // Dot separator
+    while (p < line.len and (line[p] == ' ' or line[p] == '\t')) : (p += 1) {}
+    if (p >= line.len or line[p] != '.') return false;
+    p += 1;
+
+    // Second key component: "codebase-memory-mcp"
+    while (p < line.len and (line[p] == ' ' or line[p] == '\t')) : (p += 1) {}
+    if (p >= line.len) return false;
+
+    if (line[p] == '"' or line[p] == '\'') {
+        const quote = line[p];
+        p += 1;
+        const key_start = p;
+        while (p < line.len and line[p] != quote) : (p += 1) {}
+        if (p >= line.len) return false;
+        if (!eql(line[key_start..p], "codebase-memory-mcp")) return false;
+        p += 1;
+    } else {
+        const key_start = p;
+        while (p < line.len and line[p] != ' ' and line[p] != '\t' and line[p] != ']') : (p += 1) {}
+        if (!eql(line[key_start..p], "codebase-memory-mcp")) return false;
+    }
+
+    // Closing ']'
+    while (p < line.len and (line[p] == ' ' or line[p] == '\t')) : (p += 1) {}
+    if (p >= line.len or line[p] != ']') return false;
+    p += 1;
+    if (p < line.len and line[p] == ']') return false; // not ']]'
+
+    // Rest of line: optional whitespace or comments
+    while (p < line.len) : (p += 1) {
+        if (line[p] == '#') break;
+        if (line[p] != ' ' and line[p] != '\t' and line[p] != '\r') return false;
+    }
+    return true;
+}
+
+fn findCodexMcpSection(content: []const u8) ?CodexSectionSpan {
+    var line_start: usize = 0;
+    while (line_start < content.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, content, line_start, '\n') orelse content.len;
+        const line = content[line_start..line_end];
+        if (isCodexMcpHeaderLine(line)) {
+            const header_end = if (line_end < content.len) line_end + 1 else line_end;
+            return .{
+                .start = line_start,
+                .header_end = header_end,
+            };
+        }
+        if (line_end == content.len) break;
+        line_start = line_end + 1;
+    }
+    return null;
+}
+
+/// The span of our Codex TOML section: from after its header to the next "[" line
 /// (exclusive) or EOF.
-fn codexSectionEnd(content: []const u8, header_at: usize) usize {
-    const after = header_at + CODEX_CMM_SECTION.len;
-    const next = std.mem.indexOfPos(u8, content, after, "\n[") orelse return content.len;
+fn codexSectionEnd(content: []const u8, header_end: usize) usize {
+    const next = std.mem.indexOfPos(u8, content, header_end, "\n[") orelse return content.len;
     return next + 1; // keep the newline before the next section
 }
 
@@ -1079,11 +1163,11 @@ pub export fn cbm_upsert_codex_mcp(binary_path: [*c]const u8, config_path: [*c]c
     defer c.free(content_buf);
     const content = std.mem.span(content_buf);
 
-    if (std.mem.indexOf(u8, content, CODEX_CMM_SECTION)) |at| {
+    if (findCodexMcpSection(content)) |span| {
         // Replace the old section, up to the next [section] or EOF.
-        const end = codexSectionEnd(content, at);
+        const end = codexSectionEnd(content, span.header_end);
         const suffix = if (end < content.len) content[end..] else "";
-        return writeParts(config_path, &.{ content[0..at], section, "\n", suffix });
+        return writeParts(config_path, &.{ content[0..span.start], section, "\n", suffix });
     }
     return writeParts(config_path, &.{ content_buf[0..len], "\n", section });
 }
@@ -1093,9 +1177,10 @@ pub export fn cbm_remove_codex_mcp(config_path: [*c]const u8) c_int {
     const content_buf = readFileStr(config_path, null) orelse return CLI_TRUE;
     defer c.free(content_buf);
     const content = std.mem.span(content_buf);
-    var at = std.mem.indexOf(u8, content, CODEX_CMM_SECTION) orelse return CLI_TRUE;
-    const end = codexSectionEnd(content, at);
+    const span = findCodexMcpSection(content) orelse return CLI_TRUE;
+    const end = codexSectionEnd(content, span.header_end);
     const suffix = if (end < content.len) content[end..] else "";
+    var at = span.start;
     // Remove the leading newline if present.
     if (at > 0 and content[at - 1] == '\n') at -= 1;
     return writeParts(config_path, &.{ content[0..at], suffix });
