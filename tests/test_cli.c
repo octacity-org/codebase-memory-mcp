@@ -1724,10 +1724,6 @@ TEST(cli_uninstall_indexes_kept_by_default) {
 
     char zova_dest[512];
     snprintf(zova_dest, sizeof(zova_dest), "%s/cbm.zova", cache_dir);
-    if (copy_binary_file("tests/fixtures/zova-format-13/cbm.zova", zova_dest) != 0) {
-        test_rmdir_r(tmpdir);
-        FAIL("copy fixture failed");
-    }
 
     const char *old_home = getenv("HOME");
     char *saved_home = old_home ? strdup(old_home) : NULL;
@@ -1739,6 +1735,14 @@ TEST(cli_uninstall_indexes_kept_by_default) {
     cbm_setenv("HOME", tmpdir, 1);
     cbm_setenv("USERPROFILE", tmpdir, 1);
     cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
+
+    cbm_store_t *setup_store = cbm_store_open_memory();
+    ASSERT_NOT_NULL(setup_store);
+    int s_rc = cbm_store_upsert_project(setup_store, "test-cli-uninstall", "/test/project");
+    ASSERT_EQ(s_rc, CBM_STORE_OK);
+    s_rc = th_publish_store_project(setup_store, "test-cli-uninstall");
+    cbm_store_close(setup_store);
+    ASSERT_EQ(s_rc, 0);
 
     /* 1. uninstall -y should KEEP indexes by default */
     char *argv_y[] = {"uninstall", "-y"};
