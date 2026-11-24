@@ -1197,3 +1197,12 @@ pub export fn cbm_disambiguate_cls(path_c: ?Str) Lang {
         return c.CBM_LANG_APEX;
     return if (hasVb6Markers(buf)) LANG_UNKNOWN else c.CBM_LANG_APEX;
 }
+
+pub export fn cbm_disambiguate_res(path_c: ?Str) Lang {
+    const path = path_c orelse return c.CBM_LANG_RESCRIPT;
+    const f = c.cbm_fopen(path, "rb") orelse return c.CBM_LANG_RESCRIPT;
+    var buf: [4096]u8 = undefined;
+    const n = c.fread(&buf, 1, buf.len, f);
+    _ = c.fclose(f);
+    return if (std.mem.indexOfScalar(u8, buf[0..n], 0) != null) LANG_UNKNOWN else c.CBM_LANG_RESCRIPT;
+}

@@ -51,6 +51,12 @@ CBMLanguage cbm_disambiguate_m(const char *path);
 CBMLanguage cbm_disambiguate_cls(const char *path);
 CBMLanguage cbm_disambiguate_frm(const char *path);
 
+/* Disambiguate .res files by reading first 4KB of content (#147).
+ * Returns CBM_LANG_COUNT (not indexed) for binary content (such as a Godot
+ * resource or Windows compiled resource file, recognised by a NUL byte);
+ * otherwise CBM_LANG_RESCRIPT. On read failure, defaults to CBM_LANG_RESCRIPT. */
+CBMLanguage cbm_disambiguate_res(const char *path);
+
 /* Detect a supported script language from a file's shebang (#!...) first line.
  * Conservative fallback used only when filename/extension detection is unknown
  * (see detect_file_language); it never overrides extension or special-filename
