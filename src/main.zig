@@ -549,7 +549,7 @@ fn printHelp(version: CStr) void {
         "  codebase-memory-mcp              Run MCP server on stdio\n" ++
         "  codebase-memory-mcp cli <tool> [json]  Run a single tool\n" ++
         "  codebase-memory-mcp install [-y|-n] [--force] [--dry-run] [--plan]\n" ++
-        "  codebase-memory-mcp uninstall [-y|-n] [--dry-run]\n" ++
+        "  codebase-memory-mcp uninstall [-y|-n] [--dry-run] [--delete-indexes]\n" ++
         "  codebase-memory-mcp update [-y|-n]\n" ++
         "  codebase-memory-mcp config <list|get|set|reset>\n" ++
         "  codebase-memory-mcp doctor      Show install/cache/agent status\n" ++

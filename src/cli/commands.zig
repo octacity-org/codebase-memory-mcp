@@ -35,6 +35,10 @@ fn err() ?*c.FILE {
     return interop.stderr();
 }
 
+fn stdinIsTty() bool {
+    return if (is_windows) c._isatty(0) != 0 else c.isatty(0) != 0;
+}
+
 fn hasArg(argc: c_int, argv: [*c][*c]u8, names: []const []const u8) bool {
     var i: usize = 0;
     while (i < @as(usize, @intCast(@max(argc, 0)))) : (i += 1) {
@@ -1151,8 +1155,30 @@ fn uninstallEditorAgents(agents: *const c.cbm_detected_agents_t, home: CStr, dry
 }
 
 pub export fn cbm_cmd_uninstall(argc: c_int, argv: [*c][*c]u8) c_int {
+    if (hasArg(argc, argv, &.{ "--help", "-h" })) {
+        _ = c.printf(
+            \\Usage: codebase-memory-mcp uninstall [options]
+            \\
+            \\Removes the codebase-memory-mcp binary and its agent configurations.
+            \\THIS IS DESTRUCTIVE. Project indexes are kept by default. An interactive
+            \\terminal is asked separately; the default answer is to keep them.
+            \\
+            \\Options:
+            \\  --dry-run          Show what would be removed, change nothing
+            \\  --delete-indexes   Also delete every project index (overrides --no)
+            \\  -y, --yes          Do not prompt; indexes are kept unless explicitly deleted
+            \\  -n, --no           Decline prompts; --delete-indexes still takes precedence
+            \\  -h, --help         Show this help and exit
+            \\
+            \\Run with --dry-run first if you are unsure.
+            \\
+        );
+        return 0;
+    }
+
     parseAutoAnswer(argc, argv);
     const dry_run = hasArg(argc, argv, &.{"--dry-run"});
+    const delete_indexes_requested = hasArg(argc, argv, &.{"--delete-indexes"});
 
     const home = c.cbm_get_home_dir();
     if (home == null) {
@@ -1172,11 +1198,24 @@ pub export fn cbm_cmd_uninstall(argc: c_int, argv: [*c][*c]u8) c_int {
     if (index_count > 0) {
         _ = c.printf("\nFound %d index(es):\n", index_count);
         _ = store.cbm_list_indexes(home);
-        if (promptYn("Delete these indexes?")) {
+        var delete_indexes = delete_indexes_requested;
+        if (!delete_indexes_requested) {
+            const can_ask = auto_answer == 0 and stdinIsTty();
+            delete_indexes = can_ask and promptYn("Delete these indexes? (default: no)");
+        }
+
+        if (!delete_indexes) {
+            const cache_c = c.cbm_resolve_cache_dir();
+            const cache_dir: [*c]const u8 = if (cache_c) |dir| dir else "the cache directory";
+            _ = c.printf(
+                "Indexes kept in %s. To remove them, uninstall with --delete-indexes or delete the files there.\n",
+                cache_dir,
+            );
+        } else if (dry_run) {
+            _ = c.printf("(dry-run — %d index(es) would be deleted)\n", index_count);
+        } else {
             const idx_removed = store.cbm_remove_indexes(home);
             _ = c.printf("Removed %d index(es).\n", idx_removed);
-        } else {
-            _ = c.printf("Indexes kept.\n");
         }
     }
 

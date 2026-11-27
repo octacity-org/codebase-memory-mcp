@@ -1678,6 +1678,109 @@ TEST(cli_install_and_uninstall) {
     PASS();
 }
 
+static int copy_binary_file(const char *src, const char *dst) {
+    FILE *in = fopen(src, "rb");
+    if (!in)
+        return -1;
+    FILE *out = fopen(dst, "wb");
+    if (!out) {
+        fclose(in);
+        return -1;
+    }
+    char buf[8192];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            fclose(in);
+            fclose(out);
+            return -1;
+        }
+    }
+    fclose(in);
+    fclose(out);
+    return 0;
+}
+
+TEST(cli_uninstall_help) {
+    char *argv[] = {"uninstall", "--help"};
+    int rc = cbm_cmd_uninstall(2, argv);
+    ASSERT_EQ(rc, 0);
+
+    char *argv_short[] = {"uninstall", "-h"};
+    rc = cbm_cmd_uninstall(2, argv_short);
+    ASSERT_EQ(rc, 0);
+    PASS();
+}
+
+TEST(cli_uninstall_indexes_kept_by_default) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-uninst-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char cache_dir[512];
+    snprintf(cache_dir, sizeof(cache_dir), "%s/cache", tmpdir);
+    test_mkdirp(cache_dir);
+
+    char zova_dest[512];
+    snprintf(zova_dest, sizeof(zova_dest), "%s/cbm.zova", cache_dir);
+
+    const char *old_home = getenv("HOME");
+    char *saved_home = old_home ? strdup(old_home) : NULL;
+    const char *old_up = getenv("USERPROFILE");
+    char *saved_up = old_up ? strdup(old_up) : NULL;
+    const char *old_cache = getenv("CBM_CACHE_DIR");
+    char *saved_cache = old_cache ? strdup(old_cache) : NULL;
+
+    cbm_setenv("HOME", tmpdir, 1);
+    cbm_setenv("USERPROFILE", tmpdir, 1);
+    cbm_setenv("CBM_CACHE_DIR", cache_dir, 1);
+
+    cbm_store_t *setup_store = cbm_store_open_memory();
+    ASSERT_NOT_NULL(setup_store);
+    int s_rc = cbm_store_upsert_project(setup_store, "test-cli-uninstall", "/test/project");
+    ASSERT_EQ(s_rc, CBM_STORE_OK);
+    s_rc = th_publish_store_project(setup_store, "test-cli-uninstall");
+    cbm_store_close(setup_store);
+    ASSERT_EQ(s_rc, 0);
+
+    /* 1. uninstall -y should KEEP indexes by default */
+    char *argv_y[] = {"uninstall", "-y"};
+    int rc = cbm_cmd_uninstall(2, argv_y);
+    ASSERT_EQ(rc, 0);
+    struct stat st;
+    ASSERT_EQ(stat(zova_dest, &st), 0);
+
+    /* 2. uninstall --dry-run --delete-indexes should STILL keep indexes */
+    char *argv_dry[] = {"uninstall", "-y", "--dry-run", "--delete-indexes"};
+    rc = cbm_cmd_uninstall(4, argv_dry);
+    ASSERT_EQ(rc, 0);
+    ASSERT_EQ(stat(zova_dest, &st), 0);
+
+    /* 3. uninstall -y --delete-indexes should remove the index */
+    char *argv_del[] = {"uninstall", "-y", "--delete-indexes"};
+    rc = cbm_cmd_uninstall(3, argv_del);
+    ASSERT_EQ(rc, 0);
+    ASSERT(stat(zova_dest, &st) != 0);
+
+    if (saved_home) {
+        cbm_setenv("HOME", saved_home, 1);
+        free(saved_home);
+    }
+    if (saved_up) {
+        cbm_setenv("USERPROFILE", saved_up, 1);
+        free(saved_up);
+    }
+    if (saved_cache) {
+        cbm_setenv("CBM_CACHE_DIR", saved_cache, 1);
+        free(saved_cache);
+    } else {
+        cbm_unsetenv("CBM_CACHE_DIR");
+    }
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
 /* ═══════════════════════════════════════════════════════════════════
  *  YAML parser unit tests
  * ═══════════════════════════════════════════════════════════════════ */
@@ -4006,6 +4109,8 @@ SUITE(cli) {
     /* Dry-run lifecycle (2 tests) */
     RUN_TEST(cli_install_dry_run);
     RUN_TEST(cli_uninstall_dry_run);
+    RUN_TEST(cli_uninstall_help);
+    RUN_TEST(cli_uninstall_indexes_kept_by_default);
 
     /* Full lifecycle (1 test — cli_test.go) */
     RUN_TEST(cli_install_and_uninstall);
