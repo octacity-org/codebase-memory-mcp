@@ -1187,6 +1187,30 @@ TEST(bash_function) {
     PASS();
 }
 
+/* In Bash files, only sourced files (source FILE or . FILE) are imports,
+ * not every invoked command (#139). */
+TEST(bash_imports_are_sourced_files_only) {
+    CBMFileResult *r = extract("#!/usr/bin/env bash\nset -euo pipefail\nsource ./lib/util.sh\n"
+                               ". \"$DIR/other.sh\"\ncd build\nmake all\n"
+                               "if true; then\n  source nested.sh\nfi\n",
+                               CBM_LANG_BASH, "t", "run.sh");
+    ASSERT_NOT_NULL(r);
+    ASSERT_FALSE(r->has_error);
+    ASSERT_EQ(r->imports.count, 3);
+    ASSERT(has_import(r, "lib/util.sh"));
+    ASSERT(has_import(r, "other.sh"));
+    ASSERT(has_import(r, "nested.sh"));
+    static const char *const commands[] = {"set", "source", ".", "cd", "make"};
+    for (int i = 0; i < r->imports.count; i++) {
+        ASSERT_NOT_NULL(r->imports.items[i].module_path);
+        for (size_t c = 0; c < sizeof(commands) / sizeof(commands[0]); c++) {
+            ASSERT_TRUE(strcmp(r->imports.items[i].module_path, commands[c]) != 0);
+        }
+    }
+    cbm_free_result(r);
+    PASS();
+}
+
 /* --- Perl --- */
 TEST(perl_function) {
     CBMFileResult *r = extract("sub greet {\n    my ($name) = @_;\n    return \"Hello "
@@ -6998,6 +7022,7 @@ SUITE(extraction) {
     RUN_TEST(ts_class);
     RUN_TEST(lua_function);
     RUN_TEST(bash_function);
+    RUN_TEST(bash_imports_are_sourced_files_only);
     RUN_TEST_LANG(CBM_LANG_PERL, perl_function);
     RUN_TEST_LANG(CBM_LANG_R, r_function);
 
