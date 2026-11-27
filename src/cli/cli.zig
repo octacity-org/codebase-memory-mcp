@@ -1122,16 +1122,31 @@ fn isCodexMcpHeaderLine(line: []const u8) bool {
     return true;
 }
 
-fn findCodexMcpSection(content: []const u8) ?CodexSectionSpan {
-    var line_start: usize = 0;
+const CodexSectionSpan = struct {
+    start: usize,
+    header_end: usize,
+    end: usize,
+};
+
+/// The span of our Codex TOML section: from after its header to the next "[" line
+/// (exclusive) or EOF. header_end is the newline position of the header line.
+fn codexSectionEnd(content: []const u8, header_end: usize) usize {
+    const next = std.mem.indexOfPos(u8, content, header_end, "\n[") orelse return content.len;
+    return next + 1; // keep the newline before the next section
+}
+
+pub fn findNextCodexMcpSection(content: []const u8, from: usize) ?CodexSectionSpan {
+    var line_start: usize = from;
     while (line_start < content.len) {
         const line_end = std.mem.indexOfScalarPos(u8, content, line_start, '\n') orelse content.len;
         const line = content[line_start..line_end];
         if (isCodexMcpHeaderLine(line)) {
-            const header_end = if (line_end < content.len) line_end + 1 else line_end;
+            const header_end = line_end;
+            const end = codexSectionEnd(content, header_end);
             return .{
                 .start = line_start,
                 .header_end = header_end,
+                .end = end,
             };
         }
         if (line_end == content.len) break;
@@ -1140,11 +1155,8 @@ fn findCodexMcpSection(content: []const u8) ?CodexSectionSpan {
     return null;
 }
 
-/// The span of our Codex TOML section: from after its header to the next "[" line
-/// (exclusive) or EOF.
-fn codexSectionEnd(content: []const u8, header_end: usize) usize {
-    const next = std.mem.indexOfPos(u8, content, header_end, "\n[") orelse return content.len;
-    return next + 1; // keep the newline before the next section
+pub fn hasCodexMcpSection(content: []const u8) bool {
+    return findNextCodexMcpSection(content, 0) != null;
 }
 
 pub export fn cbm_upsert_codex_mcp(binary_path: [*c]const u8, config_path: [*c]const u8) c_int {
@@ -1163,13 +1175,38 @@ pub export fn cbm_upsert_codex_mcp(binary_path: [*c]const u8, config_path: [*c]c
     defer c.free(content_buf);
     const content = std.mem.span(content_buf);
 
-    if (findCodexMcpSection(content)) |span| {
-        // Replace the old section, up to the next [section] or EOF.
-        const end = codexSectionEnd(content, span.header_end);
-        const suffix = if (end < content.len) content[end..] else "";
-        return writeParts(config_path, &.{ content[0..span.start], section, "\n", suffix });
+    if (findNextCodexMcpSection(content, 0) == null) {
+        return writeParts(config_path, &.{ content, "\n", section });
     }
-    return writeParts(config_path, &.{ content_buf[0..len], "\n", section });
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+
+    var cursor: usize = 0;
+    var first = true;
+    while (findNextCodexMcpSection(content, cursor)) |span| {
+        if (first) {
+            out.appendSlice(gpa, content[cursor..span.start]) catch return CLI_ERR;
+            out.appendSlice(gpa, section) catch return CLI_ERR;
+            cursor = span.end;
+            if (cursor < content.len and content[cursor] == '[') {
+                out.appendSlice(gpa, "\n") catch return CLI_ERR;
+            }
+            first = false;
+        } else {
+            var at = span.start;
+            if (at > cursor and content[at - 1] == '\n') {
+                at -= 1;
+                if (at > cursor and content[at - 1] == '\r') at -= 1;
+            }
+            out.appendSlice(gpa, content[cursor..at]) catch return CLI_ERR;
+            cursor = span.end;
+        }
+    }
+    if (cursor < content.len) {
+        out.appendSlice(gpa, content[cursor..]) catch return CLI_ERR;
+    }
+    return writeFileStr(config_path, out.items);
 }
 
 pub export fn cbm_remove_codex_mcp(config_path: [*c]const u8) c_int {
@@ -1177,13 +1214,25 @@ pub export fn cbm_remove_codex_mcp(config_path: [*c]const u8) c_int {
     const content_buf = readFileStr(config_path, null) orelse return CLI_TRUE;
     defer c.free(content_buf);
     const content = std.mem.span(content_buf);
-    const span = findCodexMcpSection(content) orelse return CLI_TRUE;
-    const end = codexSectionEnd(content, span.header_end);
-    const suffix = if (end < content.len) content[end..] else "";
-    var at = span.start;
-    // Remove the leading newline if present.
-    if (at > 0 and content[at - 1] == '\n') at -= 1;
-    return writeParts(config_path, &.{ content[0..at], suffix });
+    if (findNextCodexMcpSection(content, 0) == null) return CLI_TRUE;
+
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(gpa);
+
+    var cursor: usize = 0;
+    while (findNextCodexMcpSection(content, cursor)) |span| {
+        var at = span.start;
+        if (at > cursor and content[at - 1] == '\n') {
+            at -= 1;
+            if (at > cursor and content[at - 1] == '\r') at -= 1;
+        }
+        out.appendSlice(gpa, content[cursor..at]) catch return CLI_ERR;
+        cursor = span.end;
+    }
+    if (cursor < content.len) {
+        out.appendSlice(gpa, content[cursor..]) catch return CLI_ERR;
+    }
+    return writeFileStr(config_path, out.items);
 }
 
 // ── SessionStart reminder hook (Codex / Gemini / Antigravity) ──────

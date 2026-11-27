@@ -307,7 +307,7 @@ fn installConfigDecision(label: Str, config_path: CStr, binary_path: CStr) Confi
     defer c.free(content_z);
     const content = std.mem.span(content_z);
     const has_entry = std.mem.indexOf(u8, content, "\"codebase-memory-mcp\"") != null or
-        std.mem.indexOf(u8, content, "[mcp_servers.codebase-memory-mcp]") != null;
+        cli.hasCodexMcpSection(content);
     if (!has_entry) return .write;
     if (configContainsCommand(content, sp(binary_path))) return .unchanged;
     if (install_replace_config) return .write;

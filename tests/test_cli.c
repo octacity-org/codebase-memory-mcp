@@ -2446,8 +2446,106 @@ TEST(cli_upsert_codex_mcp_quoted_and_whitespace) {
     PASS();
 }
 
-/* ═══════════════════════════════════════════════════════════════════
- *  Group B: MCP Config Upsert — Zed (corrected format)
+TEST(cli_upsert_codex_mcp_header_directly_followed_by_header) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-codex-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char configpath[512];
+    snprintf(configpath, sizeof(configpath), "%s/config.toml", tmpdir);
+
+    /* Header with no body, followed directly by another header */
+    write_test_file(configpath, "[mcp_servers.codebase-memory-mcp]\n"
+                                "[other]\n"
+                                "foo = 1\n"
+                                "[third]\n"
+                                "bar = 2\n");
+
+    int rc = cbm_upsert_codex_mcp("/usr/local/bin/codebase-memory-mcp", configpath);
+    ASSERT_EQ(rc, 0);
+
+    const char *data = read_test_file(configpath);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "[other]") != NULL);
+    ASSERT(strstr(data, "foo = 1") != NULL);
+    ASSERT(strstr(data, "[third]") != NULL);
+    ASSERT(strstr(data, "bar = 2") != NULL);
+    ASSERT(strstr(data, "[mcp_servers.codebase-memory-mcp]") != NULL);
+    ASSERT(strstr(data, "/usr/local/bin/codebase-memory-mcp") != NULL);
+
+    /* Test remove on header directly followed by another header */
+    write_test_file(configpath, "[mcp_servers.codebase-memory-mcp]\n"
+                                "[other]\n"
+                                "foo = 1\n");
+    rc = cbm_remove_codex_mcp(configpath);
+    ASSERT_EQ(rc, 0);
+
+    data = read_test_file(configpath);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "codebase-memory-mcp") == NULL);
+    ASSERT(strstr(data, "[other]") != NULL);
+    ASSERT(strstr(data, "foo = 1") != NULL);
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
+TEST(cli_upsert_codex_mcp_two_tables_cleaned_up) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "/tmp/cli-codex-XXXXXX");
+    if (!cbm_mkdtemp(tmpdir))
+        FAIL("cbm_mkdtemp failed");
+
+    char configpath[512];
+    snprintf(configpath, sizeof(configpath), "%s/config.toml", tmpdir);
+
+    /* Two existing tables: one quoted, one unquoted */
+    write_test_file(configpath, "[mcp_servers.\"codebase-memory-mcp\"]\n"
+                                "command = \"/old1/path\"\n\n"
+                                "[other]\n"
+                                "foo = 1\n\n"
+                                "[mcp_servers.codebase-memory-mcp]\n"
+                                "command = \"/old2/path\"\n");
+
+    int rc = cbm_upsert_codex_mcp("/new/path/codebase-memory-mcp", configpath);
+    ASSERT_EQ(rc, 0);
+
+    const char *data = read_test_file(configpath);
+    ASSERT_NOT_NULL(data);
+    /* Exactly one table remains */
+    int count = 0;
+    const char *p = data;
+    while ((p = strstr(p, "mcp_servers.")) != NULL) {
+        count++;
+        p += strlen("mcp_servers.");
+    }
+    ASSERT_EQ(count, 1);
+    ASSERT(strstr(data, "/old1/path") == NULL);
+    ASSERT(strstr(data, "/old2/path") == NULL);
+    ASSERT(strstr(data, "/new/path/codebase-memory-mcp") != NULL);
+    ASSERT(strstr(data, "[other]") != NULL);
+    ASSERT(strstr(data, "foo = 1") != NULL);
+
+    /* Test remove drops all matching tables */
+    write_test_file(configpath, "[mcp_servers.\"codebase-memory-mcp\"]\n"
+                                "command = \"/old1/path\"\n\n"
+                                "[other]\n"
+                                "foo = 1\n\n"
+                                "[mcp_servers.codebase-memory-mcp]\n"
+                                "command = \"/old2/path\"\n");
+    rc = cbm_remove_codex_mcp(configpath);
+    ASSERT_EQ(rc, 0);
+
+    data = read_test_file(configpath);
+    ASSERT_NOT_NULL(data);
+    ASSERT(strstr(data, "codebase-memory-mcp") == NULL);
+    ASSERT(strstr(data, "[other]") != NULL);
+    ASSERT(strstr(data, "foo = 1") != NULL);
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
  * ═══════════════════════════════════════════════════════════════════ */
 
 TEST(cli_zed_mcp_uses_args_format) {
@@ -4037,6 +4135,8 @@ SUITE(cli) {
     RUN_TEST(cli_upsert_codex_mcp_existing);
     RUN_TEST(cli_upsert_codex_mcp_replace);
     RUN_TEST(cli_upsert_codex_mcp_quoted_and_whitespace);
+    RUN_TEST(cli_upsert_codex_mcp_header_directly_followed_by_header);
+    RUN_TEST(cli_upsert_codex_mcp_two_tables_cleaned_up);
 
     /* Zed MCP format fix (1 test — group B) */
     RUN_TEST(cli_zed_mcp_uses_args_format);
