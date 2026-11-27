@@ -75,6 +75,25 @@ fn addTyped(out: *MutDoc, obj: *MutVal, key: Str, type_: ?[]const u8, value: CSt
             arr = c.yyjson_mut_arr(out);
             _ = c.yyjson_mut_obj_add(obj, c.yyjson_mut_strcpy(out, key), arr);
         }
+        if (have_value and v[0] == '[') {
+            const lit = c.yyjson_read(v, std.mem.len(v), 0);
+            if (lit != null) {
+                defer c.yyjson_doc_free(lit);
+                const lit_root = c.yyjson_doc_get_root(lit);
+                if (lit_root != null and c.yyjson_is_arr(lit_root)) {
+                    var it: c.yyjson_arr_iter = undefined;
+                    _ = c.yyjson_arr_iter_init(lit_root, &it);
+                    while (c.yyjson_arr_iter_next(&it)) |elem| {
+                        if (c.yyjson_is_str(elem)) {
+                            _ = c.yyjson_mut_arr_add_strcpy(out, arr, c.yyjson_get_str(elem));
+                        } else {
+                            _ = c.yyjson_mut_arr_add_val(arr, c.yyjson_val_mut_copy(out, elem));
+                        }
+                    }
+                    return;
+                }
+            }
+        }
         _ = c.yyjson_mut_arr_add_strcpy(out, arr, v);
         return;
     }
