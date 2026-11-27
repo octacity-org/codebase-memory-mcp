@@ -63,6 +63,7 @@ Re-vendoring from upstream must re-apply these.
 | rescript   | `rescript/scanner.c`, deserialize | guard `memcpy(state, buffer, n_bytes)` with `if (n_bytes > 0)` | UBSan: zero-length `memcpy` with a NULL `buffer` / `n_bytes == 0` on empty-state deserialize (formal UB, harmless). The sibling serialize copies a fixed `sizeof(ScannerState)` (always > 0, non-NULL src) and needs no guard. |
 | purescript | `purescript/scanner.c`, serialize | guard `memcpy(buffer, indents->data, to_copy)` with `if (to_copy > 0)` | UBSan: zero-length `memcpy` with a NULL/0-size source when the indent vector is empty (formal UB, harmless) |
 | swift      | `swift/scanner.c`, OP_SYMBOL_SUPPRESSOR (:132) and suppressor loop (:515) | use 64-bit shift `UINT64_C(1)` for suppressor bitmask (`FAKE_TRY_BANG`) | FAKE_TRY_BANG is token 32, so a 32-bit 1 << n is undefined behavior and drops the suppressor bit; UINT64_C(1) keeps it. |
+| wit        | `wit/scanner.c`, `..._external_scanner_create` | `{}` → `{ return NULL; }` | **Uninitialized read (MSan).** The function returns `void *` but had no `return`, and tree-sitter's runtime stores the result as the scanner payload, so every WIT parse used an indeterminate value (C11 6.9.1p12 makes that undefined). The scanner never reads its payload, so ordinary builds were unaffected, and the vendored build's `-w` hid `-Wreturn-type`. Upstream bytecodealliance/tree-sitter-wit still carries it at `059bfdd1af72` (2025-06-23, the last change to `src/scanner.c`) |
 
 ## Vendored from verified upstream
 
