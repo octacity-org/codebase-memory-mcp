@@ -390,6 +390,19 @@ pub export fn cbm_should_skip_dir(dirname_c: ?Str, mode: Mode) bool {
     return false;
 }
 
+/// Check if a directory path matches a built-in skip suffix (e.g. storage/framework/views).
+/// Matches component-aligned relative path suffixes.
+pub export fn cbm_should_skip_dir_suffix(rel_path_c: ?Str) bool {
+    const rel_path = std.mem.span(rel_path_c orelse return false);
+    for (ALWAYS_SKIP_DIR_SUFFIXES) |suffix| {
+        if (!std.mem.endsWith(u8, rel_path, suffix)) continue;
+        if (rel_path.len == suffix.len or rel_path[rel_path.len - suffix.len - 1] == '/') {
+            return true;
+        }
+    }
+    return false;
+}
+
 pub export fn cbm_has_ignored_suffix(filename_c: ?Str, mode: Mode) bool {
     const filename = std.mem.span(filename_c orelse return false);
 
@@ -689,18 +702,6 @@ fn optsMode(opts: ?*const c.cbm_discover_opts_t) Mode {
     return if (opts) |o| o.mode else MODE_FULL;
 }
 
-/// True when rel_path equals a suffix rule or ends with "/" + the rule.
-fn relPathHasSkipSuffix(rel_path_c: ?Str) bool {
-    const rel_path = std.mem.span(rel_path_c orelse return false);
-    for (ALWAYS_SKIP_DIR_SUFFIXES) |suffix| {
-        if (!std.mem.endsWith(u8, rel_path, suffix)) continue;
-        if (rel_path.len == suffix.len or rel_path[rel_path.len - suffix.len - 1] == '/') {
-            return true;
-        }
-    }
-    return false;
-}
-
 fn directoryVerdict(
     entry_name: Str,
     rel_path: Str,
@@ -709,7 +710,7 @@ fn directoryVerdict(
     global_gi: ?*const Gitignore,
     cbmignore: ?*const Gitignore,
 ) DirVerdict {
-    if (cbm_should_skip_dir(entry_name, optsMode(opts)) or relPathHasSkipSuffix(rel_path)) {
+    if (cbm_should_skip_dir(entry_name, optsMode(opts)) or cbm_should_skip_dir_suffix(rel_path)) {
         // #500: a .cbmignore negation (e.g. "!obj/") whose rule is the last
         // match for this dir un-skips a built-in skip-list dir — except the
         // non-negatable safety core. Fall through so .gitignore/global/local

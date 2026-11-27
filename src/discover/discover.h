@@ -113,6 +113,10 @@ typedef enum {
  * Only checks the basename, not the full path. */
 bool cbm_should_skip_dir(const char *dirname, cbm_index_mode_t mode);
 
+/* Check if a directory path matches a built-in skip suffix (e.g. storage/framework/views).
+ * Matches component-aligned relative path suffixes. */
+bool cbm_should_skip_dir_suffix(const char *rel_path);
+
 /* Check if a file has a suffix that should be skipped (e.g. .pyc, .png). */
 bool cbm_has_ignored_suffix(const char *filename, cbm_index_mode_t mode);
 

@@ -1554,6 +1554,19 @@ TEST(discover_skips_laravel_compiled_views_issue1735) {
     PASS();
 }
 
+TEST(discover_should_skip_dir_suffix) {
+    ASSERT_TRUE(cbm_should_skip_dir_suffix("storage/framework/views"));
+    ASSERT_TRUE(cbm_should_skip_dir_suffix("backend/storage/framework/views"));
+    ASSERT_TRUE(cbm_should_skip_dir_suffix("a/b/c/storage/framework/views"));
+    ASSERT_FALSE(cbm_should_skip_dir_suffix("views"));
+    ASSERT_FALSE(cbm_should_skip_dir_suffix("app/views"));
+    ASSERT_FALSE(cbm_should_skip_dir_suffix("resources/views"));
+    ASSERT_FALSE(cbm_should_skip_dir_suffix("storage/views"));
+    ASSERT_FALSE(cbm_should_skip_dir_suffix("mystorage/framework/views"));
+    ASSERT_FALSE(cbm_should_skip_dir_suffix(NULL));
+    PASS();
+}
+
 /* Like the other ordinary built-in skip dirs (#500), a .cbmignore negation
  * un-skips the compiled-view cache for a user who really wants it indexed. */
 TEST(discover_cbmignore_negates_laravel_compiled_views_issue1735) {
@@ -2539,6 +2552,7 @@ SUITE(discover) {
     /* Laravel compiled Blade view cache (issue #1735) */
     RUN_TEST(discover_skips_laravel_compiled_views_issue1735);
     RUN_TEST(discover_cbmignore_negates_laravel_compiled_views_issue1735);
+    RUN_TEST(discover_should_skip_dir_suffix);
 
     /* .git/info/exclude support (issue #489) */
     RUN_TEST(discover_git_info_exclude);

@@ -159,7 +159,7 @@ fn coverageExclusion(rel: CStr, gitignore: ?*const c.cbm_gitignore_t, cbmignore:
         prefix[slash] = 0;
         const dir = p[0..slash];
         const base = if (std.mem.lastIndexOfScalar(u8, dir, '/')) |s| prefix[s + 1 ..].ptr else prefix[0..].ptr;
-        if (c.cbm_should_skip_dir(@ptrCast(base), c.CBM_MODE_FULL)) return "skipped_directory";
+        if (c.cbm_should_skip_dir(@ptrCast(base), c.CBM_MODE_FULL) or c.cbm_should_skip_dir_suffix(&prefix)) return "skipped_directory";
         if (gitignore != null and c.cbm_gitignore_matches(gitignore, &prefix, true)) return "gitignore";
         if (cbmignore != null and c.cbm_gitignore_matches(cbmignore, &prefix, true)) return "cbmignore";
         prefix[slash] = '/';
