@@ -308,14 +308,24 @@ pub export fn cbm_replace_binary(path: [*c]const u8, data: [*c]const u8, len: c_
         const fd = c.open(path, c.O_WRONLY | c.O_CREAT | c.O_TRUNC | c.O_CLOEXEC, @as(c_uint, @bitCast(mode)));
         if (fd < 0) return CLI_ERR;
         break :blk c.fdopen(fd, "wb") orelse {
+            const fdopen_errno = interop.errno();
             _ = c.close(fd);
+            interop.setErrno(fdopen_errno);
             return CLI_ERR;
         };
     };
+    // On failure errno is the failing call's, so the caller can name the OS
+    // error. A short write keeps its errno across the close; a failed close
+    // (the flush that hits a full disk) is a failure too.
     const n: usize = @intCast(len);
     const written = c.fwrite(data, 1, n, f);
-    _ = c.fclose(f);
-    return if (written == n) 0 else CLI_ERR;
+    const write_errno = interop.errno();
+    const close_rc = c.fclose(f);
+    if (written != n) {
+        interop.setErrno(write_errno);
+        return CLI_ERR;
+    }
+    return if (close_rc == 0) 0 else CLI_ERR;
 }
 
 // ── Skill file content (embedded) ──────────────────────────────────
