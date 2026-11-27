@@ -3,7 +3,8 @@
 //! Implements the discovery part of src/discover/discover.h.
 //!
 //! Walks a repository directory tree, applying:
-//!   1. Hardcoded directory skip patterns (60+ dirs like .git, node_modules)
+//!   1. Hardcoded directory skip patterns (60+ dirs like .git, node_modules,
+//!      plus path-suffix rules such as Laravel's storage/framework/views)
 //!   2. Hardcoded suffix filters (.pyc, .png, .wasm, etc.)
 //!   3. Fast-mode additional filters (docs, examples, lock files, etc.)
 //!   4. Gitignore-style pattern matching
@@ -117,6 +118,18 @@ const ALWAYS_SKIP_DIRS = [_][]const u8{
     ".tmp",
     "vendor",
     "vendored",
+};
+
+// Always-skip directories matched by relative-PATH suffix, not by basename:
+// generated build output whose last path component alone ("views") is far too
+// common to skip everywhere. A rule matches the whole relative path or a
+// '/'-aligned tail of it, so "storage/framework/views" and
+// "backend/storage/framework/views" match while "app/views",
+// "mystorage/framework/views" and "storage/framework/views_old" do not.
+const ALWAYS_SKIP_DIR_SUFFIXES = [_][]const u8{
+    // Laravel's compiled Blade view cache (#1735): generated PHP with no source
+    // value, skipped even when Laravel's stock .gitignore there is missing.
+    "storage/framework/views",
 };
 
 const FAST_SKIP_DIRS = [_][]const u8{
@@ -374,6 +387,19 @@ pub export fn cbm_should_skip_dir(dirname_c: ?Str, mode: Mode) bool {
     // Fast discovery applies to both MODERATE and FAST — only FULL keeps everything.
     if (mode != MODE_FULL and strInList(dirname, &FAST_SKIP_DIRS)) return true;
 
+    return false;
+}
+
+/// Check if a directory path matches a built-in skip suffix (e.g. storage/framework/views).
+/// Matches component-aligned relative path suffixes.
+pub export fn cbm_should_skip_dir_suffix(rel_path_c: ?Str) bool {
+    const rel_path = std.mem.span(rel_path_c orelse return false);
+    for (ALWAYS_SKIP_DIR_SUFFIXES) |suffix| {
+        if (!std.mem.endsWith(u8, rel_path, suffix)) continue;
+        if (rel_path.len == suffix.len or rel_path[rel_path.len - suffix.len - 1] == '/') {
+            return true;
+        }
+    }
     return false;
 }
 
@@ -684,7 +710,7 @@ fn directoryVerdict(
     global_gi: ?*const Gitignore,
     cbmignore: ?*const Gitignore,
 ) DirVerdict {
-    if (cbm_should_skip_dir(entry_name, optsMode(opts))) {
+    if (cbm_should_skip_dir(entry_name, optsMode(opts)) or cbm_should_skip_dir_suffix(rel_path)) {
         // #500: a .cbmignore negation (e.g. "!obj/") whose rule is the last
         // match for this dir un-skips a built-in skip-list dir — except the
         // non-negatable safety core. Fall through so .gitignore/global/local

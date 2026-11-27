@@ -1715,6 +1715,7 @@ TEST(tool_check_index_coverage_reports_recorded_gaps) {
     ASSERT_EQ(th_write_file(TH_PATH(root, "sub/inner.c"), "int inner(void) { return 0; }\n"), 0);
     ASSERT_EQ(th_write_file(TH_PATH(root, "gen.c"), "int generated(void) { return 0; }\n"), 0);
     ASSERT_EQ(th_write_file(TH_PATH(root, ".gitignore"), "gen.c\n"), 0);
+    ASSERT_EQ(th_write_file(TH_PATH(root, "storage/framework/views/cached.php"), "<?php echo 1;"), 0);
     ASSERT_EQ(th_write_file(TH_PATH(other, "clean.c"), "int clean(void) { return 0; }\n"), 0);
 
     const char *saved_cache = getenv("CBM_CACHE_DIR");
@@ -1740,7 +1741,7 @@ TEST(tool_check_index_coverage_reports_recorded_gaps) {
 
     const char *paths_args =
         "{\"project\":\"cov-a\",\"paths\":[\"good.c\",\"broken.c\",\"./sub/inner.c\",\"gen.c\","
-        "\"nope.c\",\"../x.c\",\"/etc/hosts\",\"\"]}";
+        "\"nope.c\",\"../x.c\",\"/etc/hosts\",\"\",\"storage/framework/views/cached.php\"]}";
     char *cov = cbm_mcp_handle_tool(srv, "check_index_coverage", paths_args);
     bool paths_ok =
         response_contains_json_fragment(cov, "\"coverage_recorded\":true") &&
@@ -1755,7 +1756,9 @@ TEST(tool_check_index_coverage_reports_recorded_gaps) {
         coverage_path_is(cov, "nope.c", "status", "missing") &&
         coverage_path_is(cov, "../x.c", "status", "outside_project") &&
         coverage_path_is(cov, "/etc/hosts", "status", "outside_project") &&
-        coverage_path_is(cov, "", "status", "invalid_path");
+        coverage_path_is(cov, "", "status", "invalid_path") &&
+        coverage_path_is(cov, "storage/framework/views/cached.php", "status", "excluded") &&
+        coverage_path_is(cov, "storage/framework/views/cached.php", "reason", "skipped_directory");
     char *ranges = coverage_path_field(cov, "broken.c", "parse_error_ranges");
     bool ranges_ok = ranges && strstr(ranges, "\"start\":") && strstr(ranges, "\"end\":");
     free(ranges);
