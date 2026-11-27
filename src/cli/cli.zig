@@ -1055,11 +1055,6 @@ pub export fn cbm_remove_instructions(path: [*c]const u8) c_int {
 
 const CODEX_CMM_SECTION = "[mcp_servers.codebase-memory-mcp]";
 
-const CodexSectionSpan = struct {
-    start: usize,
-    header_end: usize,
-};
-
 fn isCodexMcpHeaderLine(line: []const u8) bool {
     var p: usize = 0;
     while (p < line.len and (line[p] == ' ' or line[p] == '\t')) : (p += 1) {}
@@ -1135,7 +1130,7 @@ fn codexSectionEnd(content: []const u8, header_end: usize) usize {
     return next + 1; // keep the newline before the next section
 }
 
-pub fn findNextCodexMcpSection(content: []const u8, from: usize) ?CodexSectionSpan {
+fn findNextCodexMcpSection(content: []const u8, from: usize) ?CodexSectionSpan {
     var line_start: usize = from;
     while (line_start < content.len) {
         const line_end = std.mem.indexOfScalarPos(u8, content, line_start, '\n') orelse content.len;

@@ -2546,6 +2546,9 @@ TEST(cli_upsert_codex_mcp_two_tables_cleaned_up) {
     test_rmdir_r(tmpdir);
     PASS();
 }
+
+/* ═══════════════════════════════════════════════════════════════════
+ *  Group B: MCP Config Upsert — Zed (corrected format)
  * ═══════════════════════════════════════════════════════════════════ */
 
 TEST(cli_zed_mcp_uses_args_format) {
@@ -4130,7 +4133,7 @@ SUITE(cli) {
     RUN_TEST(cli_detect_agents_finds_junie_issue651);
     RUN_TEST(cli_detect_agents_none_found);
 
-    /* Codex MCP config upsert (4 tests — group B) */
+    /* Codex MCP config upsert (6 tests — group B) */
     RUN_TEST(cli_upsert_codex_mcp_fresh);
     RUN_TEST(cli_upsert_codex_mcp_existing);
     RUN_TEST(cli_upsert_codex_mcp_replace);
