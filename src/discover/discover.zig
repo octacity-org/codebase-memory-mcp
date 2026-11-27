@@ -759,6 +759,7 @@ fn detectFileLanguage(entry_name: Str, abs_path: Str) Lang {
         // Special: .cls / .frm are shared with VB6 class modules and forms
         if (std.mem.eql(u8, ext, ".cls")) lang = language.cbm_disambiguate_cls(abs_path);
         if (std.mem.eql(u8, ext, ".frm")) lang = language.cbm_disambiguate_frm(abs_path);
+        if (std.mem.eql(u8, ext, ".res")) lang = language.cbm_disambiguate_res(abs_path);
     }
     // Check ignored JSON files
     if (lang == LANG_JSON and strInList(name, &IGNORED_JSON_FILES)) return LANG_UNKNOWN;
