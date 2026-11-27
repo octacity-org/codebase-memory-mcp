@@ -180,8 +180,26 @@ fn killOtherInstances() c_int {
     }
 }
 
-/// Download checksums.txt and verify the archive integrity.
-/// Returns: 0 = verified OK, 1 = mismatch (FAIL), -1 = could not verify (warning).
+/// Say why `update` failed: the step it was in, what went wrong there and,
+/// when the failure came from the OS, the OS error text (os_errno 0 = none).
+/// errno is what the C runtime sets on every platform for the file calls the
+/// update makes, so no GetLastError translation is needed on Windows.
+fn updateFailed(step: Str, detail: Str, os_errno: c_int) void {
+    if (os_errno != 0) {
+        _ = c.fprintf(err(), "error: update failed while %s: %s: %s\n", step, detail, c.strerror(os_errno));
+    } else {
+        _ = c.fprintf(err(), "error: update failed while %s: %s\n", step, detail);
+    }
+}
+
+const STEP_DOWNLOAD: Str = "downloading the release archive";
+const STEP_VERIFY: Str = "verifying the download";
+const STEP_EXTRACT: Str = "extracting the archive";
+const STEP_REPLACE: Str = "replacing the installed binary";
+
+/// Download checksums.txt and verify the archive integrity. Every failure is
+/// reported here, naming the verification step.
+/// Returns: 0 = verified OK, 1 = mismatch (FAIL), -1 = could not verify.
 fn verifyDownloadChecksum(archive_path: CStr, archive_name: Str) c_int {
     var checksum_buf: [256]u8 = undefined;
     const checksum_file = fmtZ(&checksum_buf, "{s}/cbm-checksums.txt", .{sp(c.cbm_tmpdir())});
@@ -193,15 +211,21 @@ fn verifyDownloadChecksum(archive_path: CStr, archive_name: Str) c_int {
         fmtZ(&url_buf, "{s}/checksums.txt", .{sp(dl_base)})
     else
         fmtZ(&url_buf, "{s}", .{DEFAULT_DOWNLOAD_BASE ++ "/checksums.txt"});
-    if (downloadToFileQuiet(checksum_url, checksum_file) != 0) {
-        _ = c.fprintf(err(), "warning: could not download checksums.txt — skipping verification\n");
+    var detail_buf: [1024]u8 = undefined;
+    const curl_rc = downloadToFileQuiet(checksum_url, checksum_file);
+    if (curl_rc != 0) {
+        updateFailed(STEP_VERIFY, fmtZ(&detail_buf, "could not download {s} (curl exit {d})", .{ sp(checksum_url), curl_rc }), 0);
         _ = c.cbm_unlink(checksum_file);
         return CLI_ERR;
     }
 
     const fp = c.fopen(checksum_file, "r");
+    const open_errno = interop.errno();
     _ = c.cbm_unlink(checksum_file);
-    if (fp == null) return CLI_ERR;
+    if (fp == null) {
+        updateFailed(STEP_VERIFY, fmtZ(&detail_buf, "cannot open {s}", .{sp(checksum_file)}), open_errno);
+        return CLI_ERR;
+    }
 
     var expected = std.mem.zeroes([SHA256_HEX_LEN + 1]u8);
     var line: [512]u8 = undefined;
@@ -216,18 +240,19 @@ fn verifyDownloadChecksum(archive_path: CStr, archive_name: Str) c_int {
     _ = c.fclose(fp);
 
     if (expected[0] == 0) {
-        _ = c.fprintf(err(), "warning: %s not found in checksums.txt\n", archive_name);
+        updateFailed(STEP_VERIFY, fmtZ(&detail_buf, "{s} is not listed in checksums.txt", .{std.mem.span(archive_name)}), 0);
         return CLI_ERR;
     }
 
     var actual = std.mem.zeroes([SHA256_HEX_LEN + 1]u8);
+    interop.setErrno(0);
     if (cbm_cli_sha256_file(archive_path, &actual, actual.len) != 0) {
-        _ = c.fprintf(err(), "error: could not compute checksum (sha256 tool unavailable)\n");
+        updateFailed(STEP_VERIFY, fmtZ(&detail_buf, "cannot read {s} to compute its checksum", .{sp(archive_path)}), interop.errno());
         return CLI_ERR;
     }
 
     if (!eql(bufStr(&expected), bufStr(&actual))) {
-        _ = c.fprintf(err(), "error: CHECKSUM MISMATCH — downloaded binary may be compromised!\n");
+        updateFailed(STEP_VERIFY, "CHECKSUM MISMATCH — downloaded binary may be compromised!", 0);
         _ = c.fprintf(err(), "  expected: %s\n", @as(CStr, &expected));
         _ = c.fprintf(err(), "  actual:   %s\n", @as(CStr, &actual));
         return CLI_TRUE;
@@ -1243,26 +1268,43 @@ pub export fn cbm_cmd_uninstall(argc: c_int, argv: [*c][*c]u8) c_int {
 // ── Subcommand: update ─────────────────────────────────────────────
 
 /// Read archive from disk, extract binary (tar.gz or zip), write to bin_dest.
-/// Returns 0 on success, 1 on failure. Cleans up tmp_archive.
+/// Returns 0 on success, 1 on failure after reporting the failing step and
+/// its OS error. Cleans up tmp_archive.
 fn extractAndInstallBinary(tmp_archive: Str, ext: []const u8, bin_dest: Str) c_int {
+    var detail_buf: [1280]u8 = undefined;
     const f = c.fopen(tmp_archive, "rb");
     if (f == null) {
-        _ = c.fprintf(err(), "error: cannot open %s\n", tmp_archive);
+        updateFailed(STEP_EXTRACT, fmtZ(&detail_buf, "cannot open {s}", .{sp(tmp_archive)}), interop.errno());
         return CLI_TRUE;
     }
     _ = c.fseek(f, 0, c.SEEK_END);
     const fsize = c.ftell(f);
+    const size_errno = interop.errno();
     _ = c.fseek(f, 0, c.SEEK_SET);
 
-    const data = interop.mallocN(u8, @intCast(@max(fsize, 0)));
-    if (fsize < 0 or data == null) {
+    if (fsize < 0) {
         _ = c.fclose(f);
         _ = c.cbm_unlink(tmp_archive);
-        c.free(data);
+        updateFailed(STEP_EXTRACT, fmtZ(&detail_buf, "cannot size {s}", .{sp(tmp_archive)}), size_errno);
         return CLI_TRUE;
     }
-    _ = c.fread(data, 1, @intCast(fsize), f);
+    const data = interop.mallocN(u8, @intCast(fsize));
+    if (data == null) {
+        _ = c.fclose(f);
+        _ = c.cbm_unlink(tmp_archive);
+        updateFailed(STEP_EXTRACT, fmtZ(&detail_buf, "out of memory reading {s} ({d} bytes)", .{ sp(tmp_archive), fsize }), 0);
+        return CLI_TRUE;
+    }
+    interop.setErrno(0);
+    const got = c.fread(data, 1, @intCast(fsize), f);
+    const read_errno = interop.errno();
     _ = c.fclose(f);
+    if (got != @as(usize, @intCast(fsize))) {
+        c.free(data);
+        _ = c.cbm_unlink(tmp_archive);
+        updateFailed(STEP_EXTRACT, fmtZ(&detail_buf, "read {d} of {d} bytes of {s}", .{ got, fsize, sp(tmp_archive) }), read_errno);
+        return CLI_TRUE;
+    }
 
     var bin_len: c_int = 0;
     const archive = @import("archive.zig");
@@ -1275,17 +1317,25 @@ fn extractAndInstallBinary(tmp_archive: Str, ext: []const u8, bin_dest: Str) c_i
     _ = c.cbm_unlink(tmp_archive);
 
     if (bin_data == null or bin_len <= 0) {
-        _ = c.fprintf(err(), "error: binary not found in archive\n");
+        updateFailed(STEP_EXTRACT, "the archive is damaged or does not contain the codebase-memory-mcp binary", 0);
         c.free(bin_data);
         return CLI_TRUE;
     }
     defer c.free(bin_data);
 
+    interop.setErrno(0);
     if (cli.cbm_replace_binary(bin_dest, bin_data, bin_len, OCTAL_PERM) != 0) {
-        _ = c.fprintf(err(), "error: cannot write to %s\n", bin_dest);
+        updateFailed(STEP_REPLACE, fmtZ(&detail_buf, "cannot write {s}", .{sp(bin_dest)}), interop.errno());
         return CLI_TRUE;
     }
     return 0;
+}
+
+/// Test seam for the extract and replace steps of `update`, which the command
+/// itself reaches only after stopping every running server. Not declared in
+/// cli.h; the test carries an extern forward declaration.
+export fn cbm_update_extract_and_install_for_test(archive_path: [*c]const u8, ext: [*c]const u8, bin_dest: [*c]const u8) c_int {
+    return extractAndInstallBinary(archive_path, sp(ext), bin_dest);
 }
 
 /// Linux ships a fully-static "-portable" build; the standard linux binary
@@ -1310,7 +1360,9 @@ fn downloadVerifyInstall(url: Str, ext: []const u8, bin_dest: Str) c_int {
 
     const rc = downloadToFile(url, tmp_archive);
     if (rc != 0) {
-        _ = c.fprintf(err(), "error: download failed (exit %d)\n", rc);
+        // curl -S has already printed its own reason on the line above.
+        var detail_buf: [1024]u8 = undefined;
+        updateFailed(STEP_DOWNLOAD, fmtZ(&detail_buf, "could not download {s} to {s} (curl exit {d})", .{ sp(url), sp(tmp_archive), rc }), 0);
         _ = c.cbm_unlink(tmp_archive);
         return CLI_TRUE;
     }
@@ -1420,7 +1472,13 @@ pub export fn cbm_cmd_update(argc: c_int, argv: [*c][*c]u8) c_int {
     var dest_buf: [1024]u8 = undefined;
     const bin_dest = installTargetPath(home, &dest_buf);
     var dir_buf: [1024]u8 = undefined;
-    _ = c.cbm_mkdir_p(fmtZ(&dir_buf, "{s}/.local/bin", .{sp(home)}), OCTAL_PERM);
+    const bin_dir = fmtZ(&dir_buf, "{s}/.local/bin", .{sp(home)});
+    interop.setErrno(0);
+    if (!c.cbm_mkdir_p(bin_dir, OCTAL_PERM) and !cli.pathExists(bin_dir)) {
+        var detail_buf: [1280]u8 = undefined;
+        updateFailed("creating the install directory", fmtZ(&detail_buf, "cannot create {s}", .{sp(bin_dir)}), interop.errno());
+        return CLI_TRUE;
+    }
 
     if (downloadVerifyInstall(url, ext, bin_dest) != 0) return CLI_TRUE;
 
@@ -1431,7 +1489,10 @@ pub export fn cbm_cmd_update(argc: c_int, argv: [*c][*c]u8) c_int {
 
     // Step 6: Refresh all agent configs (skills, MCP entries, hooks).
     _ = c.printf("Refreshing agent configurations...\n");
-    if (!installConfigsChecked(home, bin_dest, true, false, replace_config)) return CLI_TRUE;
+    if (!installConfigsChecked(home, bin_dest, true, false, replace_config)) {
+        updateFailed("refreshing agent configurations", "the binary was replaced, but the configuration errors above remain", 0);
+        return CLI_TRUE;
+    }
 
     // Step 7: Verify new version (exec directly, no shell interpretation).
     _ = c.printf("\nUpdate complete. Verifying:\n");

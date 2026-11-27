@@ -3594,6 +3594,114 @@ TEST(replace_binary_creates_new_file) {
     PASS();
 }
 
+/* ── update: a failure names its step and the OS error (#154) ──────── */
+
+/* Internal seam (not in cli.h): the extract and replace steps of `update`. */
+extern int cbm_update_extract_and_install_for_test(const char *archive_path, const char *ext,
+                                                   const char *bin_dest);
+
+/* Runs the extract-and-replace steps with stderr sent to a file under dir and
+ * copies what they printed into msg. Returns their result, or -1 if the
+ * redirect failed. */
+static int update_install_stderr(const char *dir, const char *archive, const char *dest, char *msg,
+                                 size_t msg_size) {
+    msg[0] = '\0';
+    char err_path[600];
+    snprintf(err_path, sizeof(err_path), "%s/stderr.txt", dir);
+    (void)fflush(stderr);
+    int saved = dup(fileno(stderr));
+    FILE *out = fopen(err_path, "w+");
+    if (saved < 0 || !out || dup2(fileno(out), fileno(stderr)) < 0) {
+        if (out)
+            (void)fclose(out);
+        if (saved >= 0)
+            close(saved);
+        return -1;
+    }
+    int rc = cbm_update_extract_and_install_for_test(archive, "tar.gz", dest);
+    (void)fflush(stderr);
+    (void)dup2(saved, fileno(stderr));
+    close(saved);
+    rewind(out);
+    size_t n = fread(msg, 1, msg_size - 1, out);
+    msg[n] = '\0';
+    (void)fclose(out);
+    remove(err_path);
+    return rc;
+}
+
+TEST(update_failure_names_extract_step_and_os_error) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "%s/cli-updext-XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmpdir)) {
+        FAIL("cbm_mkdtemp failed");
+    }
+    char archive[512];
+    char dest[512];
+    char msg[2048];
+    snprintf(archive, sizeof(archive), "%s/cbm-update.tar.gz", tmpdir);
+    snprintf(dest, sizeof(dest), "%s/codebase-memory-mcp", tmpdir);
+
+    /* The archive is missing: the step and the OS error are both named. */
+    int rc = update_install_stderr(tmpdir, archive, dest, msg, sizeof(msg));
+    ASSERT_EQ(rc, 1);
+    ASSERT(strstr(msg, "error: update failed while extracting the archive: cannot open ") != NULL);
+    ASSERT(strstr(msg, archive) != NULL);
+    ASSERT(strstr(msg, strerror(ENOENT)) != NULL);
+
+    /* The archive is not a tar.gz: the same step, with no OS error to add. */
+    write_test_file(archive, "not a valid tar.gz");
+    rc = update_install_stderr(tmpdir, archive, dest, msg, sizeof(msg));
+    ASSERT_EQ(rc, 1);
+    ASSERT(strstr(msg, "error: update failed while extracting the archive: the archive is "
+                       "damaged") != NULL);
+    struct stat st;
+    ASSERT(stat(archive, &st) != 0); /* the temporary archive is cleaned up */
+    ASSERT(stat(dest, &st) != 0);    /* nothing was installed */
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
+TEST(update_failure_names_replace_step_and_os_error) {
+    char tmpdir[256];
+    snprintf(tmpdir, sizeof(tmpdir), "%s/cli-updrep-XXXXXX", cbm_tmpdir());
+    if (!cbm_mkdtemp(tmpdir)) {
+        FAIL("cbm_mkdtemp failed");
+    }
+    char archive[512];
+    char dest[512];
+    char msg[2048];
+    snprintf(archive, sizeof(archive), "%s/cbm-update.tar.gz", tmpdir);
+    snprintf(dest, sizeof(dest), "%s/codebase-memory-mcp", tmpdir);
+
+    const char *content = "new binary";
+    int gz_len = 0;
+    unsigned char *gz = create_test_targz("codebase-memory-mcp-linux-amd64",
+                                          (const unsigned char *)content, (int)strlen(content),
+                                          &gz_len);
+    ASSERT_NOT_NULL(gz);
+    FILE *f = fopen(archive, "wb");
+    ASSERT_NOT_NULL(f);
+    ASSERT_EQ(fwrite(gz, 1, (size_t)gz_len, f), (size_t)gz_len);
+    fclose(f);
+    free(gz);
+
+    /* The install target is a directory, so it can be neither unlinked nor
+     * written: unlink fails with EPERM (macOS) or EISDIR (Linux). */
+    ASSERT_EQ(cbm_mkdir(dest), 0);
+
+    int rc = update_install_stderr(tmpdir, archive, dest, msg, sizeof(msg));
+    ASSERT_EQ(rc, 1);
+    ASSERT(strstr(msg, "error: update failed while replacing the installed binary: cannot "
+                       "write ") != NULL);
+    ASSERT(strstr(msg, dest) != NULL);
+    ASSERT(strstr(msg, strerror(EPERM)) != NULL || strstr(msg, strerror(EISDIR)) != NULL);
+
+    test_rmdir_r(tmpdir);
+    PASS();
+}
+
 #endif /* _WIN32 */
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -4370,6 +4478,8 @@ SUITE(cli) {
 #ifndef _WIN32
     RUN_TEST(replace_binary_overwrites_readonly);
     RUN_TEST(replace_binary_creates_new_file);
+    RUN_TEST(update_failure_names_extract_step_and_os_error);
+    RUN_TEST(update_failure_names_replace_step_and_os_error);
 #endif
 
     /* CLI tool-argument flags / per-tool --help (#680) */
