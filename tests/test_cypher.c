@@ -560,6 +560,36 @@ TEST(cypher_parse_error) {
     PASS();
 }
 
+/* #150: a pattern that fails partway frees what it already parsed. Each query
+ * fails at a different point; the first four leaked before the fix, and the
+ * fifth reaches the same property-list failure through a second MATCH. The
+ * leak itself only shows under a leak checker; without one this pins that
+ * every failure path still returns a clean error. */
+TEST(cypher_parse_error_frees_partial_pattern) {
+    static const char *const queries[] = {
+        /* named path: unsupported, fails at the first node */
+        "MATCH p = (a:Class)-[:INHERITS*1..3]->(b:Class) RETURN a.name, length(p)",
+        /* property list fails after one parsed entry */
+        "MATCH (a:Function {name: \"x\", 7}) RETURN a",
+        /* relationship cut off after its variable */
+        "MATCH (a:Function)-[r:CALLS",
+        /* second node's label missing, after a parsed relationship */
+        "MATCH (a:Function)-[:CALLS]->(b:",
+        /* a second MATCH clause's pattern fails inside its properties */
+        "MATCH (a:Function) MATCH (b:Function {name: \"y\" 5}) RETURN a",
+    };
+    for (size_t i = 0; i < sizeof(queries) / sizeof(queries[0]); i++) {
+        cbm_query_t *q = NULL;
+        char *err = NULL;
+        int rc = cbm_cypher_parse(queries[i], &q, &err);
+        ASSERT_EQ(rc, -1);
+        ASSERT_NOT_NULL(err);
+        free(err);
+        cbm_query_free(q);
+    }
+    PASS();
+}
+
 /* ══════════════════════════════════════════════════════════════════
  *  EXECUTION TESTS (end-to-end against store)
  * ══════════════════════════════════════════════════════════════════ */
@@ -5556,6 +5586,7 @@ SUITE(cypher) {
     RUN_TEST(cypher_parse_return_distinct);
     RUN_TEST(cypher_parse_inline_props);
     RUN_TEST(cypher_parse_error);
+    RUN_TEST(cypher_parse_error_frees_partial_pattern);
     /* Execution */
     RUN_TEST(cypher_exec_deadline_aborts_runaway_query_issue601);
     RUN_TEST(cypher_exec_deadline_allows_normal_query_issue601);

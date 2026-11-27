@@ -451,16 +451,17 @@ fn parseProps(p: *Parser, out: *[*c]c.cbm_prop_filter_t, count: *c_int) c_int {
     if (arr == null) return NOT_FOUND;
 
     while (!check(p, c.TOK_RBRACE) and !check(p, c.TOK_EOF)) {
+        // Every failure frees the entries already parsed, not only the array.
         const key = expect(p, c.TOK_IDENT) orelse {
-            c.free(@ptrCast(arr));
+            propsFree(arr, n);
             return NOT_FOUND;
         };
         if (expect(p, c.TOK_COLON) == null) {
-            c.free(@ptrCast(arr));
+            propsFree(arr, n);
             return NOT_FOUND;
         }
         const val = expect(p, c.TOK_STRING) orelse {
-            c.free(@ptrCast(arr));
+            propsFree(arr, n);
             return NOT_FOUND;
         };
 
@@ -1615,7 +1616,9 @@ fn parseReturnOrWith(p: *Parser, out: *[*c]ReturnClause, is_with: bool) c_int {
     return 0;
 }
 
-/// Parse a single MATCH pattern into pat.
+/// Parse a single MATCH pattern into pat. On failure pat is freed and zeroed:
+/// the callers count a pattern only after it parsed, so cbm_query_free would
+/// never release a partial one (upstream 37a3d329).
 fn parseMatchPattern(p: *Parser, pat: *c.cbm_pattern_t) c_int {
     pat.* = .{};
     var node_cap: c_int = INIT_CAP4;
@@ -1623,25 +1626,34 @@ fn parseMatchPattern(p: *Parser, pat: *c.cbm_pattern_t) c_int {
     pat.nodes = mallocN(c.cbm_node_pattern_t, ix(node_cap));
     pat.rels = callocN(c.cbm_rel_pattern_t, ix(rel_cap));
 
-    if (parseNode(p, pat.nodes) < 0) return NOT_FOUND;
+    // A failed parseNode / parseRel leaves its element zeroed except for what
+    // it allocated, so the element is counted before the check and
+    // failMatchPattern frees its partial state with the rest.
     pat.node_count = 1;
+    if (parseNode(p, pat.nodes) < 0) return failMatchPattern(pat);
 
     while (check(p, c.TOK_DASH) or check(p, c.TOK_LT)) {
         if (pat.rel_count >= rel_cap) {
             rel_cap *= 2;
             pat.rels = safeReallocN(c.cbm_rel_pattern_t, pat.rels, ix(rel_cap));
         }
-        if (parseRel(p, (pat.rels + ix(pat.rel_count))) < 0) return NOT_FOUND;
         pat.rel_count += 1;
+        if (parseRel(p, (pat.rels + ix(pat.rel_count - 1))) < 0) return failMatchPattern(pat);
 
         if (pat.node_count >= node_cap) {
             node_cap *= 2;
             pat.nodes = safeReallocN(c.cbm_node_pattern_t, pat.nodes, ix(node_cap));
         }
-        if (parseNode(p, (pat.nodes + ix(pat.node_count))) < 0) return NOT_FOUND;
         pat.node_count += 1;
+        if (parseNode(p, (pat.nodes + ix(pat.node_count - 1))) < 0) return failMatchPattern(pat);
     }
     return 0;
+}
+
+fn failMatchPattern(pat: *c.cbm_pattern_t) c_int {
+    freePattern(pat);
+    pat.* = .{};
+    return NOT_FOUND;
 }
 
 /// Parse an UNWIND [...] AS var clause into q.
