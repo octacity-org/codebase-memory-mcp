@@ -4980,6 +4980,42 @@ TEST(search_scan_skips_missing_file) {
     PASS();
 }
 
+/* Issue #133: scan_in_process must refuse any listed path whose resolved target
+ * escapes the canonical project root (e.g. a directory symlink swapped in after
+ * indexing), while still scanning legitimate in-root files. */
+TEST(search_scan_skips_symlink_escaping_root) {
+#ifdef _WIN32
+    SKIP_PLATFORM("POSIX symlink escape repro; Windows _fullpath uses the same guard");
+#else
+    char root[256];
+    char outside[256];
+    snprintf(root, sizeof(root), "%s", th_mktempdir("cbm_scan_symlink_root"));
+    snprintf(outside, sizeof(outside), "%s", th_mktempdir("cbm_scan_symlink_out"));
+    const char *text = "ESCAPED_NEEDLE\n";
+    ASSERT_TRUE(scan_write_file(outside, "secret.c", text, strlen(text)));
+    ASSERT_TRUE(scan_write_file(root, "safe.c", text, strlen(text)));
+
+    char link_dir[512];
+    snprintf(link_dir, sizeof(link_dir), "%s/ext", root);
+    ASSERT_EQ(symlink(outside, link_dir), 0);
+
+    const char *names[] = {"ext/secret.c", "safe.c"};
+    char list[512];
+    ASSERT_TRUE(scan_write_list(root, names, 2, list, sizeof(list)));
+    char *out = malloc(SCAN_OUT_SIZE);
+    ASSERT_NOT_NULL(out);
+
+    ASSERT_EQ(scan_run(list, root, "ESCAPED_NEEDLE", false, out), SCAN_OK);
+    ASSERT_STR_EQ(out, "safe.c:1:ESCAPED_NEEDLE\n");
+
+    free(out);
+    cbm_unlink(link_dir);
+    th_cleanup(root);
+    th_cleanup(outside);
+    PASS();
+#endif
+}
+
 TEST(search_scan_reports_deadline) {
     char root[256];
     snprintf(root, sizeof(root), "%s", th_mktempdir("cbm_scan_deadline"));
@@ -5152,6 +5188,117 @@ TEST(search_code_unindexed_project_scans_recursively) {
     cbm_mcp_server_free(srv);
     th_cleanup(tmp);
     PASS();
+}
+
+/* Issue #133: when an indexed directory is replaced after indexing by a symlink
+ * pointing outside the project root, search_code must drop matches from the
+ * escaped target and never return its contents, while in-root files still match. */
+TEST(search_code_drops_indexed_path_replaced_by_external_symlink) {
+#ifdef _WIN32
+    SKIP_PLATFORM("POSIX directory symlink repro");
+#else
+    char root[256];
+    char outside[256];
+    snprintf(root, sizeof(root), "%s", th_mktempdir("cbm_search_escape_root"));
+    snprintf(outside, sizeof(outside), "%s", th_mktempdir("cbm_search_escape_out"));
+
+    char sub_dir[512];
+    snprintf(sub_dir, sizeof(sub_dir), "%s/sub", root);
+    cbm_mkdir(sub_dir);
+
+    const char *orig_text = "def orig():\n    return 'ORIGINAL_ONLY'\n";
+    const char *keep_text = "def keep():\n    return 'SHARED_TOKEN'\n";
+    const char *leak_text = "def leaked():\n    return 'SHARED_TOKEN OUTSIDE_LEAK'\n";
+    ASSERT_TRUE(scan_write_file(sub_dir, "target.py", orig_text, strlen(orig_text)));
+    ASSERT_TRUE(scan_write_file(root, "keep.py", keep_text, strlen(keep_text)));
+    ASSERT_TRUE(scan_write_file(outside, "target.py", leak_text, strlen(leak_text)));
+
+    th_remove_zova_user_database();
+    cbm_mcp_server_t *srv = cbm_mcp_server_new();
+    ASSERT_NOT_NULL(srv);
+    cbm_store_t *st = cbm_mcp_server_store(srv);
+    ASSERT_NOT_NULL(st);
+    const char *proj = "search-escape";
+    cbm_mcp_server_set_project(srv, proj);
+    cbm_store_upsert_project(st, proj, root);
+
+    cbm_node_t f_sub = {.project = proj,
+                        .label = "File",
+                        .name = "target.py",
+                        .qualified_name = "search-escape.sub.target",
+                        .file_path = "sub/target.py"};
+    cbm_node_t fn_sub = {.project = proj,
+                         .label = "Function",
+                         .name = "orig",
+                         .qualified_name = "search-escape.sub.target.orig",
+                         .file_path = "sub/target.py",
+                         .start_line = 1,
+                         .end_line = 2};
+    cbm_node_t f_keep = {.project = proj,
+                         .label = "File",
+                         .name = "keep.py",
+                         .qualified_name = "search-escape.keep",
+                         .file_path = "keep.py"};
+    cbm_node_t fn_keep = {.project = proj,
+                          .label = "Function",
+                          .name = "keep",
+                          .qualified_name = "search-escape.keep.keep",
+                          .file_path = "keep.py",
+                          .start_line = 1,
+                          .end_line = 2};
+    ASSERT_GT(cbm_store_upsert_node(st, &f_sub), 0);
+    ASSERT_GT(cbm_store_upsert_node(st, &fn_sub), 0);
+    ASSERT_GT(cbm_store_upsert_node(st, &f_keep), 0);
+    ASSERT_GT(cbm_store_upsert_node(st, &fn_keep), 0);
+    ASSERT_EQ(th_publish_store_project(st, proj), 0);
+
+    /* Replace the indexed sub/ directory with a symlink pointing outside root. */
+    char orig_file[640];
+    snprintf(orig_file, sizeof(orig_file), "%s/target.py", sub_dir);
+    ASSERT_EQ(cbm_unlink(orig_file), 0);
+    ASSERT_EQ(cbm_rmdir(sub_dir), 0);
+    ASSERT_EQ(symlink(outside, sub_dir), 0);
+
+    /* A token that exists only in the external file must produce zero hits. */
+    char *resp1 = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":133,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"search_code\","
+             "\"arguments\":{\"pattern\":\"OUTSIDE_LEAK\",\"project\":\"search-escape\"}}}");
+    ASSERT_NOT_NULL(resp1);
+    char *inner1 = extract_text_content(resp1);
+    ASSERT_NOT_NULL(inner1);
+    int matches1 = -1;
+    const char *g1 = strstr(inner1, "\"total_grep_matches\":");
+    if (g1) {
+        sscanf(g1, "\"total_grep_matches\":%d", &matches1);
+    }
+    ASSERT_EQ(matches1, 0);
+    ASSERT_TRUE(strstr(inner1, "OUTSIDE_LEAK") == NULL);
+    ASSERT_TRUE(strstr(inner1, "sub/target.py") == NULL);
+    free(inner1);
+    free(resp1);
+
+    /* A shared token must return only the in-root file, never the escaped one. */
+    char *resp2 = cbm_mcp_server_handle(
+        srv, "{\"jsonrpc\":\"2.0\",\"id\":134,\"method\":\"tools/call\","
+             "\"params\":{\"name\":\"search_code\","
+             "\"arguments\":{\"pattern\":\"SHARED_TOKEN\",\"mode\":\"full\","
+             "\"project\":\"search-escape\"}}}");
+    ASSERT_NOT_NULL(resp2);
+    char *inner2 = extract_text_content(resp2);
+    ASSERT_NOT_NULL(inner2);
+    ASSERT_NOT_NULL(strstr(inner2, "keep.py"));
+    ASSERT_TRUE(strstr(inner2, "sub/target.py") == NULL);
+    ASSERT_TRUE(strstr(inner2, "OUTSIDE_LEAK") == NULL);
+    free(inner2);
+    free(resp2);
+
+    cbm_mcp_server_free(srv);
+    cbm_unlink(sub_dir);
+    th_cleanup(root);
+    th_cleanup(outside);
+    PASS();
+#endif
 }
 
 TEST(tool_detect_changes_no_project) {
@@ -8008,11 +8155,13 @@ SUITE(mcp) {
     RUN_TEST(search_scan_crlf_lines);
     RUN_TEST(search_scan_stops_at_limit_in_list_order);
     RUN_TEST(search_scan_skips_missing_file);
+    RUN_TEST(search_scan_skips_symlink_escaping_root);
     RUN_TEST(search_scan_reports_deadline);
     RUN_TEST(search_scan_long_line);
     RUN_TEST(search_code_full_mode_after_long_line);
     RUN_TEST(search_code_literal_is_case_sensitive);
     RUN_TEST(search_code_unindexed_project_scans_recursively);
+    RUN_TEST(search_code_drops_indexed_path_replaced_by_external_symlink);
     RUN_TEST(tool_detect_changes_no_project);
     RUN_TEST(tool_index_repository_dot_uses_absolute_project_key);
     RUN_TEST(index_supervisor_gate_requires_marked_host_issue845);

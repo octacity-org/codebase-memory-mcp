@@ -313,9 +313,14 @@ fn initMatch(m: *GrepMatch, file: []const u8, line: c_int, content: []const u8) 
     sanitizeAscii(&m.content);
 }
 
-/// Parse grep output ("file:line:content", tab-delimited on Windows), apply
-/// the path filter, and collect up to grep_limit matches.
-fn collectGrepMatches(fp: ?*c.FILE, root_path: []const u8, path_regex: ?*const c.cbm_regex_t, grep_limit: usize, out: *std.ArrayList(GrepMatch)) void {
+/// Parse grep output ("file:line:content", tab-delimited on Windows), drop any
+/// match whose resolved path escapes the canonical project root, apply the
+/// path filter, and collect up to grep_limit matches.
+fn collectGrepMatches(fp: ?*c.FILE, root_path: CStr, path_regex: ?*const c.cbm_regex_t, grep_limit: usize, out: *std.ArrayList(GrepMatch)) void {
+    const root_slice = std.mem.span(root_path);
+    var real_root: [4096]u8 = undefined;
+    const has_root = mcp.resolvePath(root_path, &real_root);
+    const canonical_root = if (has_root) mcp.bufStr(&real_root) else "";
     var line: [2048]u8 = undefined;
     // A match line longer than the buffer arrives in several chunks. Parse
     // only the first chunk of each line, so a continuation is never read as
@@ -335,7 +340,8 @@ fn collectGrepMatches(fp: ?*c.FILE, root_path: []const u8, path_regex: ?*const c
         const sep2 = std.mem.indexOfScalarPos(u8, s, sep1 + 1, sep) orelse continue;
         line[sep1] = 0;
         if (is_windows) _ = c.cbm_normalize_path_sep(&line);
-        const file = stripRootPrefix(s[0..sep1], root_path);
+        if (!has_root or !mcp.pathWithinCanonicalRoot(canonical_root, &line)) continue;
+        const file = stripRootPrefix(s[0..sep1], root_slice);
         if (path_regex) |re| {
             var file_z: [2048]u8 = undefined;
             if (c.cbm_regexec(re, mcp.fmtZ(&file_z, "{s}", .{file}), 0, null, 0) != c.CBM_REG_OK) continue;
@@ -527,6 +533,9 @@ fn scanInProcess(filelist_path: CStr, root_path: CStr, pattern: CStr, use_regex:
     if (!scanReadFile(filelist_path, &list)) return .failed;
     var buffer: std.ArrayList(u8) = .empty;
     defer buffer.deinit(gpa);
+    var real_root: [4096]u8 = undefined;
+    const has_root = mcp.resolvePath(root_path, &real_root);
+    const canonical_root = if (has_root) mcp.bufStr(&real_root) else "";
     var rc: ScanRc = .ok;
     var records = std.mem.splitScalar(u8, list.items, record_separator);
     while (records.next()) |path| {
@@ -541,6 +550,9 @@ fn scanInProcess(filelist_path: CStr, root_path: CStr, pattern: CStr, use_regex:
             break;
         };
         defer gpa.free(path_z);
+        // Drop paths that resolve outside the canonical project root (e.g.,
+        // a directory replaced by a symlink after indexing).
+        if (!has_root or !mcp.pathWithinCanonicalRoot(canonical_root, path_z.ptr)) continue;
         if (!scanReadFile(path_z.ptr, &buffer)) continue;
         rc = scanBuffer(hits, &patterns, path, buffer.items.ptr[0..buffer.items.len], deadline_ms);
     }
@@ -650,6 +662,9 @@ fn writeScopedFilelist(srv: *Server, project: CStr, root_path: CStr, filelist: C
     if (fl == null) return false;
     defer _ = c.fclose(fl);
     const root = std.mem.span(root_path);
+    var real_root: [4096]u8 = undefined;
+    const has_root = mcp.resolvePath(root_path, &real_root);
+    const canonical_root = if (has_root) mcp.bufStr(&real_root) else "";
     for (indexed_files[0..@intCast(indexed_count)]) |file| {
         // A source path never legitimately contains a newline or carriage
         // return. Those bytes are the record separator on the Windows
@@ -666,14 +681,22 @@ fn writeScopedFilelist(srv: *Server, project: CStr, root_path: CStr, filelist: C
             const base = c.strrchr(file, '/');
             if (c.fnmatch(file_pattern, if (base != null) base + 1 else file, 0) != 0) continue;
         }
-        // "<root>/<file>" written piece-by-piece (no fixed-size buffer). The
-        // record separator is NUL for `xargs -0` on Unix (handles spaces in
+        // Require the resolved file path to stay inside the canonical project
+        // root before listing it for scanning (guards both the in-process
+        // scanner and the Windows PowerShell fallback).
+        const f = std.mem.span(file);
+        var abs_buf: [4096]u8 = undefined;
+        const abs_len = root.len + 1 + f.len;
+        if (!has_root or abs_len >= abs_buf.len) continue;
+        @memcpy(abs_buf[0..root.len], root);
+        abs_buf[root.len] = '/';
+        @memcpy(abs_buf[root.len + 1 .. abs_len], f);
+        abs_buf[abs_len] = 0;
+        if (!mcp.pathWithinCanonicalRoot(canonical_root, &abs_buf)) continue;
+        // Record separator is NUL for `xargs -0` on Unix (handles spaces in
         // paths) and newline for PowerShell Get-Content on Windows (NUL bytes
         // break it).
-        const f = std.mem.span(file);
-        _ = c.fwrite(root.ptr, 1, root.len, fl);
-        _ = c.fputc('/', fl);
-        _ = c.fwrite(f.ptr, 1, f.len, fl);
+        _ = c.fwrite(&abs_buf, 1, abs_len, fl);
         _ = c.fputc(if (is_windows) '\n' else 0, fl);
         written.* += 1;
     }
@@ -794,7 +817,7 @@ fn runGrepScan(tmpfile: []const u8, filelist: []const u8, scoped: bool, use_rege
     const fp = c.cbm_fopen(&outfile, "r");
     if (fp == null) return .{ .err = "search failed" };
     defer _ = c.fclose(fp);
-    collectGrepMatches(fp, std.mem.span(root_path), path_regex, GREP_MAX_MATCHES, out);
+    collectGrepMatches(fp, root_path, path_regex, GREP_MAX_MATCHES, out);
     return .ok;
 }
 
