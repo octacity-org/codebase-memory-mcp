@@ -1354,14 +1354,22 @@ export fn cbm_path_within_root(root_path: [*c]const u8, abs_path: [*c]const u8) 
     return pathWithinRoot(root_path, abs_path);
 }
 
+/// True only when abs_path, after realpath/_fullpath resolution, stays within
+/// an already-canonicalized root (from resolvePath). Use this in per-file
+/// loops so the project root is resolved once instead of per file.
+pub fn pathWithinCanonicalRoot(canonical_root: []const u8, abs_path: CStr) bool {
+    if (canonical_root.len == 0 or abs_path == null) return false;
+    var real_file: [4096]u8 = undefined;
+    if (!resolvePath(abs_path, &real_file)) return false;
+    const file = bufStr(&real_file);
+    return std.mem.startsWith(u8, file, canonical_root) and (file.len == canonical_root.len or file[canonical_root.len] == '/');
+}
+
 pub fn pathWithinRoot(root_path: CStr, abs_path: CStr) bool {
     if (root_path == null or abs_path == null) return false;
     var real_root: [4096]u8 = undefined;
-    var real_file: [4096]u8 = undefined;
-    if (!resolvePath(root_path, &real_root) or !resolvePath(abs_path, &real_file)) return false;
-    const root = bufStr(&real_root);
-    const file = bufStr(&real_file);
-    return std.mem.startsWith(u8, file, root) and (file.len == root.len or file[root.len] == '/');
+    if (!resolvePath(root_path, &real_root)) return false;
+    return pathWithinCanonicalRoot(bufStr(&real_root), abs_path);
 }
 
 pub export fn cbm_mcp_check_index_root(repo_path: [*c]const u8, canonical_out: [*c]u8, canonical_sz: usize, out_reason: [*c][*c]const u8) c_int {
